@@ -14,6 +14,7 @@ const EASYBET_ABI = [
   'event BetPlaced(uint256 indexed projectId, address indexed user, uint256 optionId, uint256 amount)',
   'event TicketPurchased(uint256 indexed projectId, address indexed buyer, uint256 indexed ticketId, uint256 optionIndex, uint256 amount)',
   'event ProjectFinalized(uint256 indexed projectId, uint256 winningOption)',
+  'event MarketplaceAction(uint256 indexed listingId, uint256 indexed projectId, uint256 indexed ticketId, address seller, address buyer, uint256 unitPrice, uint256 quantity, string action)',
   
   // 只读函数
   'function getProject(uint256) view returns (uint256, string, string, string[], uint256, uint256, uint256, address, bool, bool, uint256, uint256)',
@@ -24,11 +25,18 @@ const EASYBET_ABI = [
   'function projectCounter() view returns (uint256)',
   'function ticketNFTAddress() view returns (address)',
   'function notaryNFTAddress() view returns (address)',
+  'function getActiveListings() view returns (tuple(uint256 id, uint256 projectId, uint256 ticketId, address seller, uint256 unitPrice, uint256 quantity, uint256 remainingQuantity, bool isActive, uint256 listTime)[])',
+  'function getUserListings(address user) view returns (tuple(uint256 id, uint256 projectId, uint256 ticketId, address seller, uint256 unitPrice, uint256 quantity, uint256 remainingQuantity, bool isActive, uint256 listTime)[])',
+  'function getProjectListings(uint256 projectId) view returns (tuple(uint256 id, uint256 projectId, uint256 ticketId, address seller, uint256 unitPrice, uint256 quantity, uint256 remainingQuantity, bool isActive, uint256 listTime)[])',
+  'function getListingDetails(uint256 listingId) view returns (tuple(uint256 id, uint256 projectId, uint256 ticketId, address seller, uint256 unitPrice, uint256 quantity, uint256 remainingQuantity, bool isActive, uint256 listTime))',
   
   // 函数
   'function createProject(string title, string description, string[] options, uint256 ticketPrice, uint256 endTime) payable returns (uint256)',
   'function purchaseTicket(uint256 projectId, uint256 optionIndex) payable returns (uint256)',
   'function purchaseMultipleTickets(uint256 projectId, uint256 optionIndex, uint256 quantity) payable returns (uint256[])',
+  'function listTicketForSale(uint256 ticketId, uint256 unitPrice, uint256 quantity) returns (uint256)',
+  'function buyListedTicket(uint256 listingId, uint256 quantity) payable returns (bool)',
+  'function cancelListing(uint256 listingId) returns (bool)',
   
   // 管理函数
   'function setNotaryNFTAddress(address _notaryNFTAddress)',
@@ -731,6 +739,182 @@ export const getProjectTickets = async (
     return tickets;
   } catch (error: any) {
     console.error('❌ 获取项目彩票失败:', error);
+    return [];
+  }
+};
+
+// 挂单出售彩票
+export const listTicketForSale = async (
+  provider: ethers.providers.Web3Provider,
+  ticketId: string,
+  unitPrice: string, // ETH 金额
+  quantity: number
+): Promise<{ success: boolean; listingId?: string; error?: string }> => {
+  try {
+    console.log('🎫 开始挂单出售彩票...', { ticketId, unitPrice, quantity });
+    
+    const signer = provider.getSigner();
+    const contract = new ethers.Contract(EASYBET_CONTRACT_ADDRESS, EASYBET_ABI, signer);
+    
+    // 将价格转换为 wei
+    const unitPriceWei = ethers.utils.parseEther(unitPrice);
+    
+    // 调用合约函数
+    const tx = await contract.listTicketForSale(
+      ticketId,
+      unitPriceWei,
+      quantity
+    );
+    
+    console.log('📝 挂单交易已提交:', tx.hash);
+    const receipt = await tx.wait();
+    console.log('✅ 挂单交易已确认:', receipt.transactionHash);
+    
+    // 从事件中获取 listingId
+    const event = receipt.events?.find((e: any) => e.event === 'MarketplaceAction');
+    const listingId = event?.args?.listingId?.toString();
+    
+    return {
+      success: true,
+      listingId
+    };
+  } catch (error: any) {
+    console.error('❌ 挂单出售失败:', error);
+    return {
+      success: false,
+      error: error.message || '挂单出售失败'
+    };
+  }
+};
+
+// 购买挂单彩票
+export const buyListedTicket = async (
+  provider: ethers.providers.Web3Provider,
+  listingId: string,
+  quantity: number,
+  totalAmount: string // ETH 金额
+): Promise<{ success: boolean; error?: string }> => {
+  try {
+    console.log('🛒 开始购买挂单彩票...', { listingId, quantity, totalAmount });
+    
+    const signer = provider.getSigner();
+    const contract = new ethers.Contract(EASYBET_CONTRACT_ADDRESS, EASYBET_ABI, signer);
+    
+    // 将金额转换为 wei
+    const totalAmountWei = ethers.utils.parseEther(totalAmount);
+    
+    // 调用合约函数
+    const tx = await contract.buyListedTicket(listingId, quantity, {
+      value: totalAmountWei
+    });
+    
+    console.log('📝 购买交易已提交:', tx.hash);
+    const receipt = await tx.wait();
+    console.log('✅ 购买交易已确认:', receipt.transactionHash);
+    
+    return {
+      success: true
+    };
+  } catch (error: any) {
+    console.error('❌ 购买挂单彩票失败:', error);
+    return {
+      success: false,
+      error: error.message || '购买失败'
+    };
+  }
+};
+
+// 取消挂单
+export const cancelListing = async (
+  provider: ethers.providers.Web3Provider,
+  listingId: string
+): Promise<{ success: boolean; error?: string }> => {
+  try {
+    console.log('❌ 开始取消挂单...', { listingId });
+    
+    const signer = provider.getSigner();
+    const contract = new ethers.Contract(EASYBET_CONTRACT_ADDRESS, EASYBET_ABI, signer);
+    
+    // 调用合约函数
+    const tx = await contract.cancelListing(listingId);
+    
+    console.log('📝 取消挂单交易已提交:', tx.hash);
+    const receipt = await tx.wait();
+    console.log('✅ 取消挂单交易已确认:', receipt.transactionHash);
+    
+    return {
+      success: true
+    };
+  } catch (error: any) {
+    console.error('❌ 取消挂单失败:', error);
+    return {
+      success: false,
+      error: error.message || '取消挂单失败'
+    };
+  }
+};
+
+// 获取活跃的挂单列表
+export const getActiveListings = async (
+  provider: ethers.providers.Web3Provider
+): Promise<any[]> => {
+  try {
+    console.log('📋 开始获取活跃挂单列表...');
+    
+    const contract = new ethers.Contract(EASYBET_CONTRACT_ADDRESS, EASYBET_ABI, provider);
+    const listings = await contract.getActiveListings();
+    
+    console.log('✅ 获取到', listings.length, '个活跃挂单');
+    
+    // 处理挂单数据
+    const processedListings = listings.map((listing: any) => ({
+      id: listing.id.toString(),
+      projectId: listing.projectId.toString(),
+      ticketId: listing.ticketId.toString(),
+      seller: listing.seller,
+      unitPrice: ethers.utils.formatEther(listing.unitPrice),
+      quantity: listing.quantity.toString(),
+      remainingQuantity: listing.remainingQuantity.toString(),
+      isActive: listing.isActive,
+      listTime: listing.listTime.toString()
+    }));
+    
+    return processedListings;
+  } catch (error: any) {
+    console.error('❌ 获取活跃挂单列表失败:', error);
+    return [];
+  }
+};
+
+// 获取用户的挂单列表
+export const getUserListings = async (
+  provider: ethers.providers.Web3Provider,
+  userAddress: string
+): Promise<any[]> => {
+  try {
+    console.log('👤 开始获取用户挂单列表...', userAddress);
+    
+    const contract = new ethers.Contract(EASYBET_CONTRACT_ADDRESS, EASYBET_ABI, provider);
+    const listings = await contract.getUserListings(userAddress);
+    
+    console.log('✅ 获取到', listings.length, '个用户挂单');
+    
+    // 处理挂单数据
+    const processedListings = listings.map((listing: any) => ({
+      id: listing.id.toString(),
+      projectId: listing.projectId.toString(),
+      ticketId: listing.ticketId.toString(),
+      seller: listing.seller,
+      unitPrice: ethers.utils.formatEther(listing.unitPrice),
+      quantity: listing.quantity.toString(),
+      remainingQuantity: listing.remainingQuantity.toString(),
+      isActive: listing.isActive,
+      listTime: listing.listTime.toString()
+    }));
+    
+    return processedListings;
+  } catch (error: any) {
+    console.error('❌ 获取用户挂单列表失败:', error);
     return [];
   }
 };

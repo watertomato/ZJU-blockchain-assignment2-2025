@@ -48,6 +48,7 @@ export interface Ticket {
   ticketCount: number;
   price: string;
   isWinning?: boolean;
+  ticketIds?: string[]; // 可选字段，用于存储该组合下所有彩票的ID
 }
 
 // 交易订单接口

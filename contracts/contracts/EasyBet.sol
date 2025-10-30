@@ -16,6 +16,17 @@ interface ITicketNFT {
         uint256 betAmount,
         string memory metadataURI
     ) external returns (uint256);
+    
+    function ownerOf(uint256 tokenId) external view returns (address);
+    
+    function getTicketInfo(uint256 tokenId) external view returns (
+        uint256 projectId,
+        uint256 optionIndex,
+        uint256 betAmount,
+        address bettor,
+        uint256 purchaseTimestamp,
+        string memory metadataURI
+    );
 }
 
 contract EasyBet {
@@ -60,6 +71,17 @@ contract EasyBet {
         uint256 totalPayout
     );
 
+    event MarketplaceAction(
+        uint256 indexed listingId,
+        uint256 indexed projectId,
+        uint256 indexed ticketId,
+        address seller,
+        address buyer,
+        uint256 unitPrice,
+        uint256 quantity,
+        string action // "LISTED", "SOLD", "CANCELLED"
+    );
+
     // Project structure
     struct BettingProject {
         uint256 id;
@@ -76,11 +98,30 @@ contract EasyBet {
         uint256 totalBetsAmount;
     }
 
+    // Ticket listing structure for marketplace
+    struct TicketListing {
+        uint256 id;
+        uint256 projectId;
+        uint256 ticketId;
+        address seller;
+        uint256 unitPrice;
+        uint256 quantity;
+        uint256 remainingQuantity;
+        bool isActive;
+        uint256 listTime;
+    }
+
     // Mappings
     mapping(uint256 => BettingProject) public projects;
     mapping(uint256 => mapping(uint256 => uint256)) public optionBets; // projectId => optionIndex => totalAmount
     mapping(uint256 => mapping(address => mapping(uint256 => uint256))) public userBets; // projectId => user => optionIndex => amount
     mapping(address => uint256[]) public userProjects; // creator => projectIds
+
+    // Marketplace mappings
+    mapping(uint256 => TicketListing) public listings; // listingId => TicketListing
+    mapping(address => uint256[]) public userListings; // seller => listingIds
+    mapping(uint256 => uint256[]) public projectListings; // projectId => listingIds
+    uint256 public listingCounter;
 
     // Modifiers
     modifier onlyNotary() {
@@ -107,6 +148,7 @@ contract EasyBet {
         notaryNFTAddress = _notaryNFTAddress;
         ticketNFTAddress = _ticketNFTAddress;
         projectCounter = 0;
+        listingCounter = 0;
     }
 
     // Create a new betting project
@@ -376,5 +418,206 @@ contract EasyBet {
 
     function helloworld() pure external returns(string memory) {
         return "hello world";
+    }
+
+    // ==================== MARKETPLACE FUNCTIONS ====================
+
+    /**
+     * @dev 挂单出售彩票
+     * @param _ticketId 彩票NFT的tokenId
+     * @param _unitPrice 单价（wei）
+     * @param _quantity 出售数量
+     */
+    function listTicketForSale(
+        uint256 _ticketId,
+        uint256 _unitPrice,
+        uint256 _quantity
+    ) external returns (uint256) {
+        require(ticketNFTAddress != address(0), "TicketNFT address not set");
+        require(_unitPrice > 0, "Unit price must be greater than 0");
+        require(_quantity > 0, "Quantity must be greater than 0");
+        
+        // 验证调用者是彩票的拥有者
+        ITicketNFT ticketNFT = ITicketNFT(ticketNFTAddress);
+        require(ticketNFT.ownerOf(_ticketId) == msg.sender, "Not the owner of this ticket");
+        
+        // 获取彩票信息
+        (uint256 projectId, , , , , ) = ticketNFT.getTicketInfo(_ticketId);
+        
+        // 验证项目存在
+        require(projectId > 0 && projectId <= projectCounter, "Invalid project");
+        
+        // 创建挂单
+        listingCounter++;
+        uint256 listingId = listingCounter;
+        
+        listings[listingId] = TicketListing({
+            id: listingId,
+            projectId: projectId,
+            ticketId: _ticketId,
+            seller: msg.sender,
+            unitPrice: _unitPrice,
+            quantity: _quantity,
+            remainingQuantity: _quantity,
+            isActive: true,
+            listTime: block.timestamp
+        });
+        
+        // 更新映射
+        userListings[msg.sender].push(listingId);
+        projectListings[projectId].push(listingId);
+        
+        // 发出事件
+        emit MarketplaceAction(
+            listingId,
+            projectId,
+            _ticketId,
+            msg.sender,
+            address(0), // 挂单时没有买家
+            _unitPrice,
+            _quantity,
+            "LISTED"
+        );
+        
+        return listingId;
+    }
+
+    /**
+     * @dev 购买挂单的彩票
+     * @param _listingId 挂单ID
+     * @param _quantity 购买数量
+     */
+    function buyListedTicket(uint256 _listingId, uint256 _quantity) external payable {
+        require(_listingId > 0 && _listingId <= listingCounter, "Invalid listing ID");
+        
+        TicketListing storage listing = listings[_listingId];
+        require(listing.isActive, "Listing is not active");
+        require(_quantity > 0, "Quantity must be greater than 0");
+        require(_quantity <= listing.remainingQuantity, "Not enough tickets available");
+        require(msg.sender != listing.seller, "Cannot buy your own listing");
+        
+        uint256 totalPrice = listing.unitPrice * _quantity;
+        require(msg.value == totalPrice, "Incorrect payment amount");
+        
+        // 更新挂单状态
+        listing.remainingQuantity -= _quantity;
+        if (listing.remainingQuantity == 0) {
+            listing.isActive = false;
+        }
+        
+        // 转账给卖家
+        payable(listing.seller).transfer(totalPrice);
+        
+        // 转移NFT所有权（这里简化处理，实际应该根据具体需求实现）
+        // 注意：这里需要根据实际的NFT分割逻辑来实现
+        
+        // 发出事件
+        emit MarketplaceAction(
+            _listingId,
+            listing.projectId,
+            listing.ticketId,
+            listing.seller,
+            msg.sender,
+            listing.unitPrice,
+            _quantity,
+            "SOLD"
+        );
+    }
+
+    /**
+     * @dev 取消挂单
+     * @param _listingId 挂单ID
+     */
+    function cancelListing(uint256 _listingId) external {
+        require(_listingId > 0 && _listingId <= listingCounter, "Invalid listing ID");
+        
+        TicketListing storage listing = listings[_listingId];
+        require(listing.seller == msg.sender, "Not the seller");
+        require(listing.isActive, "Listing is not active");
+        
+        // 取消挂单
+        listing.isActive = false;
+        
+        // 发出事件
+        emit MarketplaceAction(
+            _listingId,
+            listing.projectId,
+            listing.ticketId,
+            listing.seller,
+            address(0),
+            listing.unitPrice,
+            listing.remainingQuantity,
+            "CANCELLED"
+        );
+    }
+
+    /**
+     * @dev 获取所有活跃的挂单
+     */
+    function getActiveListings() external view returns (uint256[] memory) {
+        uint256[] memory activeListingIds = new uint256[](listingCounter);
+        uint256 activeCount = 0;
+
+        for (uint256 i = 1; i <= listingCounter; i++) {
+            if (listings[i].isActive && listings[i].remainingQuantity > 0) {
+                activeListingIds[activeCount] = i;
+                activeCount++;
+            }
+        }
+
+        // 调整数组大小
+        uint256[] memory result = new uint256[](activeCount);
+        for (uint256 i = 0; i < activeCount; i++) {
+            result[i] = activeListingIds[i];
+        }
+
+        return result;
+    }
+
+    /**
+     * @dev 获取用户的挂单
+     * @param _user 用户地址
+     */
+    function getUserListings(address _user) external view returns (uint256[] memory) {
+        return userListings[_user];
+    }
+
+    /**
+     * @dev 获取项目的挂单
+     * @param _projectId 项目ID
+     */
+    function getProjectListings(uint256 _projectId) external view returns (uint256[] memory) {
+        return projectListings[_projectId];
+    }
+
+    /**
+     * @dev 获取挂单详情
+     * @param _listingId 挂单ID
+     */
+    function getListingDetails(uint256 _listingId) external view returns (
+        uint256 id,
+        uint256 projectId,
+        uint256 ticketId,
+        address seller,
+        uint256 unitPrice,
+        uint256 quantity,
+        uint256 remainingQuantity,
+        bool isActive,
+        uint256 listTime
+    ) {
+        require(_listingId > 0 && _listingId <= listingCounter, "Invalid listing ID");
+        
+        TicketListing storage listing = listings[_listingId];
+        return (
+            listing.id,
+            listing.projectId,
+            listing.ticketId,
+            listing.seller,
+            listing.unitPrice,
+            listing.quantity,
+            listing.remainingQuantity,
+            listing.isActive,
+            listing.listTime
+        );
     }
 }
