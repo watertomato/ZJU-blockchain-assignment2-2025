@@ -1,0 +1,56 @@
+/* 响应式布局样式 */
+@media (min-width: 992px) {
+  .mobile-menu-btn {
+    display: none !important;
+  }
+  .desktop-sider {
+    display: block !important;
+  }
+}
+
+@media (max-width: 991px) {
+  .mobile-menu-btn {
+    display: block !important;
+  }
+  .desktop-sider {
+    display: none !important;
+  }
+}
+
+/* 自定义样式 */
+.main-layout {
+  min-height: 100vh;
+}
+
+.main-layout .ant-layout-header {
+  background: #fff;
+  padding: 0 16px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.main-layout .ant-layout-content {
+  margin: 0;
+  background: #f0f2f5;
+  min-height: calc(100vh - 64px);
+}
+
+.user-avatar {
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 8px;
+}
+
+.user-avatar.notary {
+  background: #52c41a;
+}
+
+.user-avatar.player {
+  background: #1890ff;
+}
