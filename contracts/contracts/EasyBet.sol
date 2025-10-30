@@ -258,6 +258,9 @@ contract EasyBet {
         require(msg.value == projects[_projectId].ticketPrice, "Incorrect ticket price");
         require(_optionIndex < projects[_projectId].options.length, "Invalid option index");
         require(ticketNFTAddress != address(0), "TicketNFT address not set");
+        
+        // 检查票池资金是否足够
+        require(projects[_projectId].totalBetsAmount + msg.value <= projects[_projectId].totalPrize, "Insufficient funds in prize pool");
 
         // Update betting data
         optionBets[_projectId][_optionIndex] += msg.value;
@@ -305,9 +308,12 @@ contract EasyBet {
         require(msg.value == projects[_projectId].ticketPrice * _quantity, "Incorrect total payment");
         require(_optionIndex < projects[_projectId].options.length, "Invalid option index");
         require(ticketNFTAddress != address(0), "TicketNFT address not set");
+        
+        // 检查票池资金是否足够
+        uint256 totalAmount = projects[_projectId].ticketPrice * _quantity;
+        require(projects[_projectId].totalBetsAmount + totalAmount <= projects[_projectId].totalPrize, "Insufficient funds in prize pool");
 
         // Update betting data
-        uint256 totalAmount = projects[_projectId].ticketPrice * _quantity;
         optionBets[_projectId][_optionIndex] += totalAmount;
         userBets[_projectId][msg.sender][_optionIndex] += totalAmount;
         projects[_projectId].totalBetsAmount += totalAmount;

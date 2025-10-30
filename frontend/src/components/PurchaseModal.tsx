@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Modal,
   Steps,
@@ -93,8 +93,17 @@ const PurchaseModal: React.FC<PurchaseModalProps> = ({
     }
   ]);
 
-  // 计算总价
-  const totalPrice = ticketAmount * parseFloat(project.ticketPrice);
+  // 计算总价 - 使用 BigNumber 避免浮点数精度问题
+  const totalPrice = useMemo(() => {
+    try {
+      const ticketPriceWei = ethers.utils.parseEther(project.ticketPrice);
+      const totalPriceWei = ticketPriceWei.mul(ticketAmount);
+      return parseFloat(ethers.utils.formatEther(totalPriceWei));
+    } catch (error) {
+      console.error('计算总价时出错:', error);
+      return 0;
+    }
+  }, [ticketAmount, project.ticketPrice]);
 
   // 检查余额是否足够
   const hasEnoughBalance = parseFloat(balance) >= totalPrice;
@@ -104,6 +113,10 @@ const PurchaseModal: React.FC<PurchaseModalProps> = ({
   // 计算最大可购买票数（总奖池 / 票价 - 已售票数）
   const maxAvailableTickets = Math.floor(parseFloat(project.totalPool) / parseFloat(project.ticketPrice)) - project.soldTickets;
   const maxPurchaseAmount = Math.min(maxAffordableTickets, maxAvailableTickets);
+
+  // 检查是否有票可买
+  const hasTicketsAvailable = maxAvailableTickets > 0;
+  const canPurchase = hasEnoughBalance && hasTicketsAvailable && isConnected;
 
   // 重置状态
   useEffect(() => {
@@ -171,13 +184,17 @@ const PurchaseModal: React.FC<PurchaseModalProps> = ({
           ticketIds = [result.ticketId];
         }
       } else {
-        // 批量购买
+        // 批量购买 - 使用精确的金额计算
+        const ticketPriceWei = ethers.utils.parseEther(project.ticketPrice);
+        const totalPriceWei = ticketPriceWei.mul(ticketAmount);
+        const exactTotalPrice = ethers.utils.formatEther(totalPriceWei);
+        
         result = await purchaseMultipleTickets(
           provider,
           project.id,
           currentSelectedOption!.id,
           ticketAmount,
-          (totalPrice).toString()
+          exactTotalPrice
         );
         if (result.success && result.ticketIds) {
           ticketIds = result.ticketIds;
@@ -304,7 +321,8 @@ const PurchaseModal: React.FC<PurchaseModalProps> = ({
                 value={ticketAmount}
                 onChange={(value) => setTicketAmount(value || 1)}
                 style={{ width: '100%' }}
-                disabled={processing}
+                disabled={processing || !hasTicketsAvailable}
+                placeholder={!hasTicketsAvailable ? "票已售完" : undefined}
               />
             </Col>
           </Row>
@@ -320,7 +338,13 @@ const PurchaseModal: React.FC<PurchaseModalProps> = ({
                 precision={3}
               />
             </Col>
-
+            <Col span={12}>
+              <Statistic
+                title="剩余票数"
+                value={maxAvailableTickets}
+                valueStyle={{ color: maxAvailableTickets > 0 ? '#52c41a' : '#ff4d4f' }}
+              />
+            </Col>
           </Row>
 
           <Row gutter={16}>
@@ -359,6 +383,24 @@ const PurchaseModal: React.FC<PurchaseModalProps> = ({
               message="余额不足"
               description="您的钱包余额不足以完成此次购买，请先充值。"
               type="error"
+              showIcon
+            />
+          )}
+
+          {!hasTicketsAvailable && (
+            <Alert
+              message="票已售完"
+              description="该项目的彩票已全部售完，无法继续购买。"
+              type="warning"
+              showIcon
+            />
+          )}
+
+          {hasTicketsAvailable && maxPurchaseAmount < ticketAmount && (
+            <Alert
+              message="购买数量超限"
+              description={`最多只能购买 ${maxPurchaseAmount} 张彩票（受余额或剩余票数限制）。`}
+              type="warning"
               showIcon
             />
           )}
@@ -439,12 +481,14 @@ const PurchaseModal: React.FC<PurchaseModalProps> = ({
               key="purchase"
               type="primary"
               onClick={handlePurchase}
-              disabled={!hasEnoughBalance || !isConnected}
+              disabled={!canPurchase || maxPurchaseAmount < ticketAmount}
               loading={processing}
               icon={<WalletOutlined />}
             >
               {!isConnected ? '请先连接钱包' : 
+               !hasTicketsAvailable ? '票已售完' :
                !hasEnoughBalance ? '余额不足' : 
+               maxPurchaseAmount < ticketAmount ? '购买数量超限' :
                '确认购买'}
             </Button>
           )

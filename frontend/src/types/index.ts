@@ -41,9 +41,11 @@ export interface BettingOption {
 export interface Ticket {
   id: string;
   projectId: string;
+  projectTitle: string;
   owner: string;
   option: number;
-  purchaseTime: number;
+  optionName: string;
+  ticketCount: number;
   price: string;
   isWinning?: boolean;
 }

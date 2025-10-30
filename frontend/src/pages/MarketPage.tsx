@@ -3,6 +3,8 @@ import { Card, Tabs, Table, Button, Tag, Modal, InputNumber, message, Select, In
 import { ShoppingCartOutlined, DollarOutlined, SearchOutlined } from '@ant-design/icons';
 import { useWallet } from '../hooks/useWallet';
 import { Ticket, BettingProject } from '../types';
+import { getUserTickets, getProjectDetails } from '../utils/contract';
+import { ethers } from 'ethers';
 
 const { TabPane } = Tabs;
 const { Option } = Select;
@@ -35,6 +37,14 @@ const MarketPage: React.FC<MarketPageProps> = ({ defaultTab = 'market' }) => {
   const [searchText, setSearchText] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [sortBy, setSortBy] = useState<string>('time');
+
+  // 获取provider
+  const getProvider = () => {
+    if (typeof window !== 'undefined' && window.ethereum) {
+      return new ethers.providers.Web3Provider(window.ethereum);
+    }
+    return null;
+  };
 
   // Mock data
   const [marketOrders, setMarketOrders] = useState<MarketOrder[]>([
@@ -76,24 +86,84 @@ const MarketPage: React.FC<MarketPageProps> = ({ defaultTab = 'market' }) => {
     }
   ]);
 
-  const [userTickets, setUserTickets] = useState<Ticket[]>([
-    {
-      id: 'user_ticket_1',
-      projectId: '1',
-      owner: address || '',
-      option: 1,
-      purchaseTime: new Date('2024-01-10T09:00:00').getTime(),
-      price: '0.001'
-    },
-    {
-      id: 'user_ticket_2',
-      projectId: '2',
-      owner: address || '',
-      option: 2,
-      purchaseTime: new Date('2024-01-12T15:30:00').getTime(),
-      price: '0.001'
+  const [userTickets, setUserTickets] = useState<Ticket[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  // 获取用户彩票数据
+  const fetchUserTickets = async () => {
+    const provider = getProvider();
+    if (!provider || !address) {
+      setUserTickets([]);
+      return;
     }
-  ]);
+
+    setLoading(true);
+    try {
+      console.log('🎫 开始获取用户彩票数据...');
+      const rawTickets = await getUserTickets(provider, address);
+      console.log('📊 原始彩票数据:', rawTickets);
+
+      // 按项目和选项分组彩票
+      const ticketGroups = new Map<string, {
+        projectId: string;
+        optionIndex: number;
+        tickets: any[];
+        totalBetAmount: number;
+      }>();
+
+      for (const ticket of rawTickets) {
+        const key = `${ticket.projectId}-${ticket.optionIndex}`;
+        if (!ticketGroups.has(key)) {
+          ticketGroups.set(key, {
+            projectId: ticket.projectId,
+            optionIndex: parseInt(ticket.optionIndex),
+            tickets: [],
+            totalBetAmount: 0
+          });
+        }
+        const group = ticketGroups.get(key)!;
+        group.tickets.push(ticket);
+        group.totalBetAmount += parseFloat(ticket.betAmount);
+      }
+
+      // 获取项目详情并构建最终的彩票数据
+      const processedTickets: Ticket[] = [];
+      const groupEntries = Array.from(ticketGroups.entries());
+      for (const [key, group] of groupEntries) {
+        try {
+          const project = await getProjectDetails(provider, group.projectId);
+          if (project) {
+            const option = project.options[group.optionIndex];
+            processedTickets.push({
+              id: key,
+              projectId: group.projectId,
+              projectTitle: project.title,
+              owner: address,
+              option: group.optionIndex,
+              optionName: option?.name || `选项 ${group.optionIndex + 1}`,
+              ticketCount: group.tickets.length,
+              price: group.totalBetAmount.toFixed(6)
+            });
+          }
+        } catch (error) {
+          console.error('获取项目详情失败:', group.projectId, error);
+        }
+      }
+
+      console.log('✅ 处理后的彩票数据:', processedTickets);
+      setUserTickets(processedTickets);
+    } catch (error) {
+      console.error('❌ 获取用户彩票失败:', error);
+      message.error('获取彩票数据失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 监听钱包连接状态变化
+  useEffect(() => {
+    fetchUserTickets();
+  }, [address]);
 
   const handleBuyTicket = (order: MarketOrder) => {
     setSelectedOrder(order);
@@ -119,19 +189,11 @@ const MarketPage: React.FC<MarketPageProps> = ({ defaultTab = 'market' }) => {
         : order
     ));
     
-    // 添加到用户彩票
-    const newTicket: Ticket = {
-      id: selectedOrder.ticketId,
-      projectId: selectedOrder.projectId,
-      owner: address || '',
-      option: 1, // 需要从选项名称映射到数字
-      purchaseTime: new Date().getTime(),
-      price: selectedOrder.price.toString()
-    };
-    setUserTickets(prev => [...prev, newTicket]);
-    
     setBuyModalVisible(false);
     setSelectedOrder(null);
+    
+    // 重新获取用户彩票数据
+    fetchUserTickets();
   };
 
   const confirmSell = () => {
@@ -261,25 +323,37 @@ const MarketPage: React.FC<MarketPageProps> = ({ defaultTab = 'market' }) => {
   const userTicketColumns = [
     {
       title: '项目',
-      key: 'project',
-      render: (_: any, record: Ticket) => (
-        <div>
-          <div style={{ fontWeight: 'bold' }}>项目 #{record.projectId}</div>
-          <Tag color="blue">选项 {record.option}</Tag>
-        </div>
+      dataIndex: 'projectTitle',
+      key: 'projectTitle',
+      render: (title: string) => (
+        <span style={{ fontWeight: 'bold' }}>{title}</span>
       )
     },
     {
-      title: '购买价格',
-      dataIndex: 'price',
-      key: 'price',
-      render: (price: string) => `${price} ETH`
+      title: '选项',
+      dataIndex: 'optionName',
+      key: 'optionName',
+      render: (optionName: string) => (
+        <Tag color="blue">{optionName}</Tag>
+      )
     },
     {
-      title: '购买时间',
-      dataIndex: 'purchaseTime',
-      key: 'purchaseTime',
-      render: (time: number) => new Date(time).toLocaleString()
+      title: '彩票张数',
+      dataIndex: 'ticketCount',
+      key: 'ticketCount',
+      render: (count: number) => (
+        <span style={{ fontWeight: 'bold', color: '#1890ff' }}>
+          {count} 张
+        </span>
+      )
+    },
+    {
+      title: '单张价格',
+      key: 'unitPrice',
+      render: (_: any, record: Ticket) => {
+        const unitPrice = parseFloat(record.price) / record.ticketCount;
+        return `${unitPrice.toFixed(4)} ETH`;
+      }
     },
     {
       title: '操作',
@@ -339,12 +413,22 @@ const MarketPage: React.FC<MarketPageProps> = ({ defaultTab = 'market' }) => {
           </TabPane>
 
           <TabPane tab="我的彩票" key="myTickets">
-            <Table
-              columns={userTicketColumns}
-              dataSource={userTickets}
-              rowKey="id"
-              pagination={{ pageSize: 10 }}
-            />
+            {!isConnected ? (
+              <div style={{ textAlign: 'center', padding: '40px' }}>
+                <p style={{ color: '#999' }}>请先连接钱包查看您的彩票</p>
+              </div>
+            ) : (
+              <Table
+                columns={userTicketColumns}
+                dataSource={userTickets}
+                rowKey="id"
+                loading={loading}
+                pagination={{ pageSize: 10 }}
+                locale={{
+                  emptyText: loading ? '加载中...' : '暂无彩票数据'
+                }}
+              />
+            )}
           </TabPane>
         </Tabs>
       </Card>

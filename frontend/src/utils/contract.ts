@@ -451,14 +451,14 @@ export const getProjectDetails = async (
     const optionBets = await contract.getOptionBets(projectId);
     console.log('💰 选项投注金额:', optionBets);
     
-    // 计算已售票数
-     const soldTickets = Math.floor(parseFloat(ethers.utils.formatEther(totalBetsAmount)) / parseFloat(ethers.utils.formatEther(ticketPrice)));
+    // 计算已售票数 - 使用BigNumber进行精确计算
+    const soldTickets = totalBetsAmount.div(ticketPrice).toNumber();
      
      // 转换选项格式
      const optionsWithTicketCount = options.map((option: string, index: number) => {
        const optionBetAmount = optionBets[index] || ethers.BigNumber.from(0);
-       const ticketPriceEth = parseFloat(ethers.utils.formatEther(ticketPrice));
-       const ticketCount = ticketPriceEth > 0 ? Math.floor(parseFloat(ethers.utils.formatEther(optionBetAmount)) / ticketPriceEth) : 0;
+       // 使用BigNumber进行精确计算，避免浮点数精度问题
+       const ticketCount = ticketPrice.gt(0) ? optionBetAmount.div(ticketPrice).toNumber() : 0;
        return {
          id: index,
          name: option,
