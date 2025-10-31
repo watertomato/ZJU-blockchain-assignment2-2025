@@ -27,6 +27,8 @@ interface ITicketNFT {
         uint256 purchaseTimestamp,
         string memory metadataURI
     );
+    
+    function transferFrom(address from, address to, uint256 tokenId) external;
 }
 
 contract EasyBet {
@@ -104,9 +106,7 @@ contract EasyBet {
         uint256 projectId;
         uint256 ticketId;
         address seller;
-        uint256 unitPrice;
-        uint256 quantity;
-        uint256 remainingQuantity;
+        uint256 price;        // 整张彩票的价格
         bool isActive;
         uint256 listTime;
     }
@@ -121,6 +121,7 @@ contract EasyBet {
     mapping(uint256 => TicketListing) public listings; // listingId => TicketListing
     mapping(address => uint256[]) public userListings; // seller => listingIds
     mapping(uint256 => uint256[]) public projectListings; // projectId => listingIds
+    mapping(uint256 => uint256) public ticketToListing; // ticketId => listingId (防止重复挂单)
     uint256 public listingCounter;
 
     // Modifiers
@@ -423,23 +424,26 @@ contract EasyBet {
     // ==================== MARKETPLACE FUNCTIONS ====================
 
     /**
-     * @dev 挂单出售彩票
+     * @dev 挂单出售单张彩票
      * @param _ticketId 彩票NFT的tokenId
-     * @param _unitPrice 单价（wei）
-     * @param _quantity 出售数量
+     * @param _price 彩票价格（wei）
      */
     function listTicketForSale(
         uint256 _ticketId,
-        uint256 _unitPrice,
-        uint256 _quantity
+        uint256 _price
     ) external returns (uint256) {
         require(ticketNFTAddress != address(0), "TicketNFT address not set");
-        require(_unitPrice > 0, "Unit price must be greater than 0");
-        require(_quantity > 0, "Quantity must be greater than 0");
+        require(_price > 0, "Price must be greater than 0");
         
         // 验证调用者是彩票的拥有者
         ITicketNFT ticketNFT = ITicketNFT(ticketNFTAddress);
         require(ticketNFT.ownerOf(_ticketId) == msg.sender, "Not the owner of this ticket");
+        
+        // 检查是否已有活跃挂单
+        uint256 existingListingId = ticketToListing[_ticketId];
+        if (existingListingId != 0 && listings[existingListingId].isActive) {
+            revert("Ticket already listed");
+        }
         
         // 获取彩票信息
         (uint256 projectId, , , , , ) = ticketNFT.getTicketInfo(_ticketId);
@@ -456,9 +460,7 @@ contract EasyBet {
             projectId: projectId,
             ticketId: _ticketId,
             seller: msg.sender,
-            unitPrice: _unitPrice,
-            quantity: _quantity,
-            remainingQuantity: _quantity,
+            price: _price,
             isActive: true,
             listTime: block.timestamp
         });
@@ -466,6 +468,7 @@ contract EasyBet {
         // 更新映射
         userListings[msg.sender].push(listingId);
         projectListings[projectId].push(listingId);
+        ticketToListing[_ticketId] = listingId; // 记录彩票到挂单的映射
         
         // 发出事件
         emit MarketplaceAction(
@@ -474,8 +477,8 @@ contract EasyBet {
             _ticketId,
             msg.sender,
             address(0), // 挂单时没有买家
-            _unitPrice,
-            _quantity,
+            _price,
+            1, // 单张彩票
             "LISTED"
         );
         
@@ -483,33 +486,108 @@ contract EasyBet {
     }
 
     /**
-     * @dev 购买挂单的彩票
-     * @param _listingId 挂单ID
-     * @param _quantity 购买数量
+     * @dev 批量挂单出售多张彩票
+     * @param _ticketIds 彩票NFT的tokenId数组
+     * @param _prices 对应的彩票价格数组（wei）
      */
-    function buyListedTicket(uint256 _listingId, uint256 _quantity) external payable {
+    function listMultipleTicketsForSale(
+        uint256[] memory _ticketIds,
+        uint256[] memory _prices
+    ) external returns (uint256[] memory) {
+        require(ticketNFTAddress != address(0), "TicketNFT address not set");
+        require(_ticketIds.length > 0, "No tickets provided");
+        require(_ticketIds.length == _prices.length, "Arrays length mismatch");
+        require(_ticketIds.length <= 50, "Too many tickets at once"); // 限制批量数量
+        
+        ITicketNFT ticketNFT = ITicketNFT(ticketNFTAddress);
+        uint256[] memory listingIds = new uint256[](_ticketIds.length);
+        
+        for (uint256 i = 0; i < _ticketIds.length; i++) {
+            uint256 ticketId = _ticketIds[i];
+            uint256 price = _prices[i];
+            
+            require(price > 0, "Price must be greater than 0");
+            
+            // 验证调用者是彩票的拥有者
+            require(ticketNFT.ownerOf(ticketId) == msg.sender, "Not the owner of this ticket");
+            
+            // 检查是否已有活跃挂单
+            uint256 existingListingId = ticketToListing[ticketId];
+            if (existingListingId != 0 && listings[existingListingId].isActive) {
+                revert("Ticket already listed");
+            }
+            
+            // 获取彩票信息
+            (uint256 projectId, , , , , ) = ticketNFT.getTicketInfo(ticketId);
+            
+            // 验证项目存在
+            require(projectId > 0 && projectId <= projectCounter, "Invalid project");
+            
+            // 创建挂单
+            listingCounter++;
+            uint256 listingId = listingCounter;
+            
+            listings[listingId] = TicketListing({
+                id: listingId,
+                projectId: projectId,
+                ticketId: ticketId,
+                seller: msg.sender,
+                price: price,
+                isActive: true,
+                listTime: block.timestamp
+            });
+            
+            // 更新映射
+            userListings[msg.sender].push(listingId);
+            projectListings[projectId].push(listingId);
+            ticketToListing[ticketId] = listingId; // 记录彩票到挂单的映射
+            
+            // 发出事件
+            emit MarketplaceAction(
+                listingId,
+                projectId,
+                ticketId,
+                msg.sender,
+                address(0), // 挂单时没有买家
+                price,
+                1, // 单张彩票
+                "LISTED"
+            );
+            
+            listingIds[i] = listingId;
+        }
+        
+        return listingIds;
+    }
+
+    /**
+     * @dev 购买挂单的彩票（单张彩票购买）
+     * @param _listingId 挂单ID
+     */
+    function buyListedTicket(uint256 _listingId) external payable {
         require(_listingId > 0 && _listingId <= listingCounter, "Invalid listing ID");
         
         TicketListing storage listing = listings[_listingId];
         require(listing.isActive, "Listing is not active");
-        require(_quantity > 0, "Quantity must be greater than 0");
-        require(_quantity <= listing.remainingQuantity, "Not enough tickets available");
         require(msg.sender != listing.seller, "Cannot buy your own listing");
         
-        uint256 totalPrice = listing.unitPrice * _quantity;
-        require(msg.value == totalPrice, "Incorrect payment amount");
+        require(msg.value == listing.price, "Incorrect payment amount");
+        
+        // 验证卖家仍然拥有这张彩票
+        ITicketNFT ticketNFT = ITicketNFT(ticketNFTAddress);
+        require(ticketNFT.ownerOf(listing.ticketId) == listing.seller, "Seller no longer owns this ticket");
         
         // 更新挂单状态
-        listing.remainingQuantity -= _quantity;
-        if (listing.remainingQuantity == 0) {
-            listing.isActive = false;
-        }
+        listing.isActive = false;
+        
+        // 清理彩票到挂单的映射
+        delete ticketToListing[listing.ticketId];
+        
+        // 转移NFT所有权从卖家到买家
+        ticketNFT.transferFrom(listing.seller, msg.sender, listing.ticketId);
         
         // 转账给卖家
-        payable(listing.seller).transfer(totalPrice);
-        
-        // 转移NFT所有权（这里简化处理，实际应该根据具体需求实现）
-        // 注意：这里需要根据实际的NFT分割逻辑来实现
+        payable(listing.seller).transfer(listing.price);
         
         // 发出事件
         emit MarketplaceAction(
@@ -518,10 +596,137 @@ contract EasyBet {
             listing.ticketId,
             listing.seller,
             msg.sender,
-            listing.unitPrice,
-            _quantity,
+            listing.price,
+            1, // 单张彩票
             "SOLD"
         );
+    }
+
+    /**
+     * @dev 批量购买挂单的彩票（从最低价开始购买指定数量）
+     * @param _projectId 项目ID
+     * @param _optionIndex 选项索引
+     * @param _quantity 购买数量
+     */
+    function buyMultipleListedTickets(
+        uint256 _projectId, 
+        uint256 _optionIndex, 
+        uint256 _quantity
+    ) external payable returns (uint256[] memory) {
+        require(_projectId > 0 && _projectId <= projectCounter, "Invalid project ID");
+        require(_quantity > 0, "Quantity must be greater than 0");
+        
+        // 获取该项目和选项的所有活跃挂单，按价格排序
+        uint256[] memory sortedListingIds = _getSortedListingsByPrice(_projectId, _optionIndex);
+        require(sortedListingIds.length > 0, "No active listings for this project and option");
+        
+        // 计算需要购买的挂单和总价格
+        uint256[] memory listingsToBuy = new uint256[](_quantity);
+        uint256 totalPrice = 0;
+        uint256 purchasedCount = 0;
+        
+        for (uint256 i = 0; i < sortedListingIds.length && purchasedCount < _quantity; i++) {
+            uint256 listingId = sortedListingIds[i];
+            TicketListing storage listing = listings[listingId];
+            
+            if (listing.isActive && listing.seller != msg.sender) {
+                // 验证卖家仍然拥有这张彩票
+                ITicketNFT ticketNFT = ITicketNFT(ticketNFTAddress);
+                if (ticketNFT.ownerOf(listing.ticketId) == listing.seller) {
+                    listingsToBuy[purchasedCount] = listingId;
+                    totalPrice += listing.price;
+                    purchasedCount++;
+                }
+            }
+        }
+        
+        require(purchasedCount == _quantity, "Not enough tickets available for purchase");
+        require(msg.value == totalPrice, "Incorrect payment amount");
+        
+        // 执行批量购买
+        uint256[] memory purchasedTicketIds = new uint256[](_quantity);
+        
+        for (uint256 i = 0; i < _quantity; i++) {
+            uint256 listingId = listingsToBuy[i];
+            TicketListing storage listing = listings[listingId];
+            
+            // 更新挂单状态
+            listing.isActive = false;
+            
+            // 清理彩票到挂单的映射
+            delete ticketToListing[listing.ticketId];
+            
+            // 转移NFT所有权从卖家到买家
+            ITicketNFT ticketNFT = ITicketNFT(ticketNFTAddress);
+            ticketNFT.transferFrom(listing.seller, msg.sender, listing.ticketId);
+            
+            // 转账给卖家
+            payable(listing.seller).transfer(listing.price);
+            
+            // 记录购买的彩票ID
+            purchasedTicketIds[i] = listing.ticketId;
+            
+            // 发出事件
+            emit MarketplaceAction(
+                listingId,
+                listing.projectId,
+                listing.ticketId,
+                listing.seller,
+                msg.sender,
+                listing.price,
+                1, // 单张彩票
+                "SOLD"
+            );
+        }
+        
+        return purchasedTicketIds;
+    }
+
+    /**
+     * @dev 获取指定项目和选项的挂单，按价格从低到高排序
+     * @param _projectId 项目ID
+     * @param _optionIndex 选项索引
+     */
+    function _getSortedListingsByPrice(
+        uint256 _projectId, 
+        uint256 _optionIndex
+    ) internal view returns (uint256[] memory) {
+        // 首先收集所有匹配的挂单
+        uint256[] memory matchingListings = new uint256[](listingCounter);
+        uint256 matchingCount = 0;
+        
+        ITicketNFT ticketNFT = ITicketNFT(ticketNFTAddress);
+        
+        for (uint256 i = 1; i <= listingCounter; i++) {
+            TicketListing storage listing = listings[i];
+            if (listing.isActive && listing.projectId == _projectId) {
+                // 检查彩票的选项是否匹配
+                (uint256 projectId, uint256 optionIndex, , , , ) = ticketNFT.getTicketInfo(listing.ticketId);
+                if (projectId == _projectId && optionIndex == _optionIndex) {
+                    matchingListings[matchingCount] = i;
+                    matchingCount++;
+                }
+            }
+        }
+        
+        // 调整数组大小
+        uint256[] memory result = new uint256[](matchingCount);
+        for (uint256 i = 0; i < matchingCount; i++) {
+            result[i] = matchingListings[i];
+        }
+        
+        // 简单的冒泡排序，按价格从低到高排序
+        for (uint256 i = 0; i < result.length; i++) {
+            for (uint256 j = i + 1; j < result.length; j++) {
+                if (listings[result[i]].price > listings[result[j]].price) {
+                    uint256 temp = result[i];
+                    result[i] = result[j];
+                    result[j] = temp;
+                }
+            }
+        }
+        
+        return result;
     }
 
     /**
@@ -545,8 +750,8 @@ contract EasyBet {
             listing.ticketId,
             listing.seller,
             address(0),
-            listing.unitPrice,
-            listing.remainingQuantity,
+            listing.price,
+            1, // 单张彩票
             "CANCELLED"
         );
     }
@@ -559,7 +764,7 @@ contract EasyBet {
         uint256 activeCount = 0;
 
         for (uint256 i = 1; i <= listingCounter; i++) {
-            if (listings[i].isActive && listings[i].remainingQuantity > 0) {
+            if (listings[i].isActive) {
                 activeListingIds[activeCount] = i;
                 activeCount++;
             }
@@ -599,9 +804,7 @@ contract EasyBet {
         uint256 projectId,
         uint256 ticketId,
         address seller,
-        uint256 unitPrice,
-        uint256 quantity,
-        uint256 remainingQuantity,
+        uint256 price,
         bool isActive,
         uint256 listTime
     ) {
@@ -613,11 +816,23 @@ contract EasyBet {
             listing.projectId,
             listing.ticketId,
             listing.seller,
-            listing.unitPrice,
-            listing.quantity,
-            listing.remainingQuantity,
+            listing.price,
             listing.isActive,
             listing.listTime
         );
+    }
+
+    /**
+     * @dev 检查彩票是否已挂单
+     * @param _ticketId 彩票ID
+     * @return isListed 是否已挂单
+     * @return listingId 挂单ID（如果已挂单）
+     */
+    function isTicketListed(uint256 _ticketId) external view returns (bool isListed, uint256 listingId) {
+        listingId = ticketToListing[_ticketId];
+        if (listingId > 0 && listings[listingId].isActive) {
+            return (true, listingId);
+        }
+        return (false, 0);
     }
 }

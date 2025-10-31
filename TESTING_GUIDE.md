@@ -2,30 +2,70 @@
 
 ## 前置条件
 
-1. **确保 Hardhat 节点运行**
+### 完整重置流程（推荐每次测试前执行）
+
+1. **停止所有服务**
+   ```bash
+   # 停止 Hardhat 节点 (Ctrl+C)
+   # 停止前端服务 (Ctrl+C)
+   ```
+
+2. **清理浏览器缓存**
+   - **Chrome/Edge**: F12 → Network 标签 → 右键 → Clear browser cache
+   - **或者**: 设置 → 隐私和安全 → 清除浏览数据 → 选择"缓存的图片和文件"
+   - **Firefox**: F12 → 网络 → 设置图标 → 清空缓存
+
+3. **重置 MetaMask 账户**
+   ```
+   MetaMask → 设置 → 高级 → 重置账户
+   ```
+   ⚠️ **注意**: 这会清除所有交易历史，但不会影响你的助记词和余额
+
+4. **启动 Hardhat 节点**
    ```bash
    cd contracts
    npx hardhat node
    ```
 
-2. **部署合约**
+5. **部署合约**
    ```bash
    # 在新的终端窗口中执行
    cd contracts
    npx hardhat run scripts/deploy.ts --network localhost
    ```
 
-3. **启动前端应用**
+6. **启动前端应用**
    ```bash
    cd frontend
    npm start
    ```
 
-4. **配置 MetaMask**
+7. **重新配置 MetaMask**
    - 网络名称: Hardhat Local
    - RPC URL: http://127.0.0.1:8545
    - 链 ID: 31337
    - 货币符号: ETH
+
+### 快速重置流程（如果只是合约问题）
+
+如果只是合约数据问题，可以使用快速重置：
+
+1. **重启 Hardhat 节点**
+   ```bash
+   # 停止当前节点 (Ctrl+C)
+   cd contracts
+   npx hardhat node
+   ```
+
+2. **重新部署合约**
+   ```bash
+   cd contracts
+   npx hardhat run scripts/deploy.ts --network localhost
+   ```
+
+3. **刷新前端页面**
+   - 按 F5 或 Ctrl+R 刷新页面
+   - 如果还有问题，按 Ctrl+Shift+R 强制刷新
 
 ## 测试步骤
 

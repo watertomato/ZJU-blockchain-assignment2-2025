@@ -16,7 +16,7 @@ const EASYBET_ABI = [
   'event ProjectFinalized(uint256 indexed projectId, uint256 winningOption)',
   'event MarketplaceAction(uint256 indexed listingId, uint256 indexed projectId, uint256 indexed ticketId, address seller, address buyer, uint256 unitPrice, uint256 quantity, string action)',
   
-  // 只读函数
+  // 查询函数
   'function getProject(uint256) view returns (uint256, string, string, string[], uint256, uint256, uint256, address, bool, bool, uint256, uint256)',
   'function getUserProjects(address user) view returns (uint256[])',
   'function getActiveProjects() view returns (uint256[])',
@@ -25,17 +25,20 @@ const EASYBET_ABI = [
   'function projectCounter() view returns (uint256)',
   'function ticketNFTAddress() view returns (address)',
   'function notaryNFTAddress() view returns (address)',
-  'function getActiveListings() view returns (tuple(uint256 id, uint256 projectId, uint256 ticketId, address seller, uint256 unitPrice, uint256 quantity, uint256 remainingQuantity, bool isActive, uint256 listTime)[])',
-  'function getUserListings(address user) view returns (tuple(uint256 id, uint256 projectId, uint256 ticketId, address seller, uint256 unitPrice, uint256 quantity, uint256 remainingQuantity, bool isActive, uint256 listTime)[])',
-  'function getProjectListings(uint256 projectId) view returns (tuple(uint256 id, uint256 projectId, uint256 ticketId, address seller, uint256 unitPrice, uint256 quantity, uint256 remainingQuantity, bool isActive, uint256 listTime)[])',
-  'function getListingDetails(uint256 listingId) view returns (tuple(uint256 id, uint256 projectId, uint256 ticketId, address seller, uint256 unitPrice, uint256 quantity, uint256 remainingQuantity, bool isActive, uint256 listTime))',
+  'function getActiveListings() view returns (uint256[])',
+  'function getUserListings(address user) view returns (uint256[])',
+  'function getProjectListings(uint256 projectId) view returns (uint256[])',
+  'function getListingDetails(uint256 listingId) view returns (uint256 id, uint256 projectId, uint256 ticketId, address seller, uint256 price, bool isActive, uint256 listTime)',
+  'function isTicketListed(uint256 ticketId) view returns (bool isListed, uint256 listingId)',
   
   // 函数
   'function createProject(string title, string description, string[] options, uint256 ticketPrice, uint256 endTime) payable returns (uint256)',
   'function purchaseTicket(uint256 projectId, uint256 optionIndex) payable returns (uint256)',
   'function purchaseMultipleTickets(uint256 projectId, uint256 optionIndex, uint256 quantity) payable returns (uint256[])',
-  'function listTicketForSale(uint256 ticketId, uint256 unitPrice, uint256 quantity) returns (uint256)',
-  'function buyListedTicket(uint256 listingId, uint256 quantity) payable returns (bool)',
+  'function listTicketForSale(uint256 ticketId, uint256 price) returns (uint256)',
+  'function listMultipleTicketsForSale(uint256[] ticketIds, uint256[] prices) returns (uint256[])',
+  'function buyListedTicket(uint256 listingId) payable returns (bool)',
+  'function buyMultipleListedTickets(uint256 projectId, uint256 optionIndex, uint256 quantity) payable returns (uint256[])',
   'function cancelListing(uint256 listingId) returns (bool)',
   
   // 管理函数
@@ -47,6 +50,8 @@ const EASYBET_ABI = [
 const TICKET_NFT_ABI = [
   // 事件
   'event TicketMinted(address indexed to, uint256 indexed tokenId, uint256 indexed projectId, uint256 optionIndex, uint256 betAmount)',
+  'event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId)',
+  'event ApprovalForAll(address indexed owner, address indexed operator, bool approved)',
   
   // 只读函数
   'function getTicketInfo(uint256 tokenId) view returns (uint256 projectId, uint256 optionIndex, uint256 betAmount, address bettor, uint256 purchaseTimestamp, string metadataURI)',
@@ -57,10 +62,16 @@ const TICKET_NFT_ABI = [
   'function tokenURI(uint256 tokenId) view returns (string)',
   'function totalSupply() view returns (uint256)',
   'function authorizedMinter() view returns (address)',
+  'function getApproved(uint256 tokenId) view returns (address)',
+  'function isApprovedForAll(address owner, address operator) view returns (bool)',
   
   // 写入函数
   'function mintTicket(address to, uint256 projectId, uint256 optionIndex, uint256 betAmount, string metadataURI) returns (uint256)',
-  'function setAuthorizedMinter(address minter)'
+  'function setAuthorizedMinter(address minter)',
+  'function approve(address to, uint256 tokenId)',
+  'function setApprovalForAll(address operator, bool approved)',
+  'function transferFrom(address from, address to, uint256 tokenId)',
+  'function safeTransferFrom(address from, address to, uint256 tokenId)'
 ];
 
 // 创建投注项目
@@ -747,23 +758,21 @@ export const getProjectTickets = async (
 export const listTicketForSale = async (
   provider: ethers.providers.Web3Provider,
   ticketId: string,
-  unitPrice: string, // ETH 金额
-  quantity: number
+  price: string // ETH 金额
 ): Promise<{ success: boolean; listingId?: string; error?: string }> => {
   try {
-    console.log('🎫 开始挂单出售彩票...', { ticketId, unitPrice, quantity });
+    console.log('🎫 开始挂单出售彩票...', { ticketId, price });
     
     const signer = provider.getSigner();
     const contract = new ethers.Contract(EASYBET_CONTRACT_ADDRESS, EASYBET_ABI, signer);
     
     // 将价格转换为 wei
-    const unitPriceWei = ethers.utils.parseEther(unitPrice);
+    const priceWei = ethers.utils.parseEther(price);
     
     // 调用合约函数
     const tx = await contract.listTicketForSale(
       ticketId,
-      unitPriceWei,
-      quantity
+      priceWei
     );
     
     console.log('📝 挂单交易已提交:', tx.hash);
@@ -787,15 +796,59 @@ export const listTicketForSale = async (
   }
 };
 
-// 购买挂单彩票
+// 批量挂单出售彩票
+export const listMultipleTicketsForSale = async (
+  provider: ethers.providers.Web3Provider,
+  ticketIds: string[],
+  prices: string[] // ETH 金额数组
+): Promise<{ success: boolean; listingIds?: string[]; error?: string }> => {
+  try {
+    console.log('🎫 开始批量挂单出售彩票...', { ticketIds, prices });
+    
+    if (ticketIds.length !== prices.length) {
+      throw new Error('彩票ID数量与价格数量不匹配');
+    }
+    
+    const signer = provider.getSigner();
+    const contract = new ethers.Contract(EASYBET_CONTRACT_ADDRESS, EASYBET_ABI, signer);
+    
+    // 将价格转换为 wei
+    const pricesWei = prices.map(price => ethers.utils.parseEther(price));
+    
+    // 调用合约函数
+    const tx = await contract.listMultipleTicketsForSale(
+      ticketIds,
+      pricesWei
+    );
+    
+    console.log('📝 批量挂单交易已提交:', tx.hash);
+    const receipt = await tx.wait();
+    console.log('✅ 批量挂单交易已确认:', receipt.transactionHash);
+    
+    // 从事件中获取所有 listingId
+    const events = receipt.events?.filter((e: any) => e.event === 'MarketplaceAction') || [];
+    const listingIds = events.map((event: any) => event.args?.listingId?.toString());
+    
+    return {
+      success: true,
+      listingIds
+    };
+  } catch (error: any) {
+    console.error('❌ 批量挂单出售失败:', error);
+    return {
+      success: false,
+      error: error.message || '批量挂单出售失败'
+    };
+  }
+};
+
 export const buyListedTicket = async (
   provider: ethers.providers.Web3Provider,
   listingId: string,
-  quantity: number,
   totalAmount: string // ETH 金额
 ): Promise<{ success: boolean; error?: string }> => {
   try {
-    console.log('🛒 开始购买挂单彩票...', { listingId, quantity, totalAmount });
+    console.log('🛒 开始购买挂单彩票...', { listingId, totalAmount });
     
     const signer = provider.getSigner();
     const contract = new ethers.Contract(EASYBET_CONTRACT_ADDRESS, EASYBET_ABI, signer);
@@ -804,7 +857,7 @@ export const buyListedTicket = async (
     const totalAmountWei = ethers.utils.parseEther(totalAmount);
     
     // 调用合约函数
-    const tx = await contract.buyListedTicket(listingId, quantity, {
+    const tx = await contract.buyListedTicket(listingId, {
       value: totalAmountWei
     });
     
@@ -821,6 +874,323 @@ export const buyListedTicket = async (
       success: false,
       error: error.message || '购买失败'
     };
+  }
+};
+
+// 批量购买挂单彩票（从最低价开始）
+export const buyMultipleListedTickets = async (
+  provider: ethers.providers.Web3Provider,
+  projectId: string,
+  optionIndex: number,
+  quantity: number
+): Promise<{ success: boolean; ticketIds?: string[]; totalPrice?: string; error?: string }> => {
+  try {
+    console.log('🛒 开始批量购买挂单彩票...', { projectId, optionIndex, quantity });
+    
+    // 获取签名者
+    const signer = provider.getSigner();
+    const signerAddress = await signer.getAddress();
+    console.log(`👤 购买账户: ${signerAddress}`);
+    
+    // 检查账户余额
+    const balance = await provider.getBalance(signerAddress);
+    console.log(`💰 账户余额: ${ethers.utils.formatEther(balance)} ETH`);
+    
+    const contract = new ethers.Contract(EASYBET_CONTRACT_ADDRESS, EASYBET_ABI, signer);
+    
+    // 先计算总价格
+    const priceCalculation = await calculateBulkPurchasePrice(provider, projectId, optionIndex, quantity);
+    if (!priceCalculation.success) {
+      return {
+        success: false,
+        error: priceCalculation.error
+      };
+    }
+    
+    // 直接使用BigNumber格式的totalPriceWei，避免精度损失
+    const totalPriceWei = priceCalculation.totalPriceWei!;
+    
+    console.log('💰 批量购买总价:', priceCalculation.totalPrice, 'ETH');
+    console.log('💰 批量购买总价(Wei):', totalPriceWei.toString(), 'Wei');
+    
+    // 检查账户余额是否足够
+    if (balance.lt(totalPriceWei)) {
+      throw new Error(`余额不足: 需要 ${priceCalculation.totalPrice} ETH，当前余额 ${ethers.utils.formatEther(balance)} ETH`);
+    }
+    
+    // Gas估算 - 参考executeSinglePurchase的策略
+    console.log(`⛽ 正在估算Gas...`);
+    const gasEstimate = await contract.estimateGas.buyMultipleListedTickets(
+      projectId,
+      optionIndex,
+      quantity,
+      { value: totalPriceWei }
+    );
+    console.log(`⛽ Gas估算成功: ${gasEstimate.toString()}`);
+    
+    // 检查Gas限制
+    if (gasEstimate.gt(ethers.utils.parseUnits("30000000", "wei"))) {
+      console.warn(`⚠️  Gas估算过高: ${gasEstimate.toString()}`);
+    }
+    
+    // 调用合约函数 - 使用动态Gas估算
+    console.log(`🚀 执行交易...`);
+    const tx = await contract.buyMultipleListedTickets(
+      projectId,
+      optionIndex,
+      quantity,
+      {
+        value: totalPriceWei,
+        gasLimit: gasEstimate.mul(150).div(100) // 增加50%的Gas缓冲
+      }
+    );
+    
+    console.log('📝 批量购买交易已提交:', tx.hash);
+    const receipt = await tx.wait();
+    console.log('✅ 批量购买交易已确认:', receipt.transactionHash);
+    console.log(`✅ 购买 ${quantity} 张挂单彩票成功！Gas使用: ${receipt.gasUsed.toString()}`);
+    
+    // 从返回值中获取购买的彩票ID
+    const ticketIds: string[] = [];
+    if (receipt.events) {
+      const soldEvents = receipt.events.filter((e: any) => e.event === 'MarketplaceAction' && e.args?.action === 'SOLD');
+      soldEvents.forEach((event: any) => {
+        if (event.args?.ticketId) {
+          ticketIds.push(event.args.ticketId.toString());
+        }
+      });
+    }
+    
+    console.log(`🎟️  获得彩票数量: ${ticketIds.length}`);
+    ticketIds.forEach((ticketId, index) => {
+      console.log(`   彩票${index + 1} ID: ${ticketId}`);
+    });
+    
+    return {
+      success: true,
+      ticketIds,
+      totalPrice: priceCalculation.totalPrice
+    };
+  } catch (error: any) {
+    console.error('❌ 批量购买挂单彩票失败:', error);
+    
+    // 详细错误分析 - 参考executeSinglePurchase的策略
+    if (error.message.includes("revert")) {
+      console.error("   这是一个合约revert错误");
+      if (error.reason) {
+        console.error("   Revert原因:", error.reason);
+      }
+    } else if (error.message.includes("gas")) {
+      console.error("   这是一个Gas相关错误");
+      console.error("   可能是Gas限制不足或Gas估算失败");
+    } else if (error.message.includes("insufficient funds")) {
+      console.error("   余额不足");
+    } else {
+      console.error("   其他错误类型");
+    }
+    
+    // 如果是Gas估算失败，尝试分析原因
+    if (error.message.includes("estimateGas")) {
+      console.log("   🔍 Gas估算失败，可能的原因:");
+      console.log("      - 合约中有require()检查失败");
+      console.log("      - 数量超过了合约限制");
+      console.log("      - 没有足够的挂单彩票可购买");
+      console.log("      - 项目状态不允许购买");
+    }
+    
+    return {
+      success: false,
+      error: error?.reason || error?.message || '批量购买失败'
+    };
+  }
+};
+
+// 计算批量购买的总价格
+export const calculateBulkPurchasePrice = async (
+  provider: ethers.providers.Web3Provider,
+  projectId: string,
+  optionIndex: number,
+  quantity: number
+): Promise<{ success: boolean; totalPrice?: string; totalPriceWei?: ethers.BigNumber; priceBreakdown?: Array<{price: string, count: number}>; error?: string }> => {
+  try {
+    console.log('💰 计算批量购买价格...', { projectId, optionIndex, quantity });
+    
+    // 获取该项目和选项的所有活跃挂单
+    const contract = new ethers.Contract(EASYBET_CONTRACT_ADDRESS, EASYBET_ABI, provider);
+    const ticketContract = new ethers.Contract(TICKET_NFT_CONTRACT_ADDRESS, TICKET_NFT_ABI, provider);
+    
+    // 直接获取项目的挂单ID数组
+    const listingIds = await contract.getProjectListings(projectId);
+    console.log('📊 项目挂单ID数组:', listingIds);
+    
+    if (!listingIds || listingIds.length === 0) {
+      return {
+        success: false,
+        error: '该项目没有活跃的挂单'
+      };
+    }
+    
+    // 过滤出匹配选项的挂单并保持BigNumber格式
+    const matchingListings = [];
+    
+    for (const listingId of listingIds) {
+      try {
+        const listingDetails = await contract.getListingDetails(listingId);
+        
+        // 只处理活跃的挂单
+        if (!listingDetails.isActive) {
+          console.log('跳过非活跃挂单:', listingId.toString());
+          continue;
+        }
+        
+        const ticketInfo = await ticketContract.getTicketInfo(listingDetails.ticketId);
+        if (ticketInfo.optionIndex.toNumber() === optionIndex) {
+          // 验证卖家仍然拥有这张彩票（与合约逻辑保持一致）
+          try {
+            const currentOwner = await ticketContract.ownerOf(listingDetails.ticketId);
+            if (currentOwner.toLowerCase() !== listingDetails.seller.toLowerCase()) {
+              console.log('跳过所有权不匹配的挂单:', listingId.toString(), '卖家:', listingDetails.seller, '实际所有者:', currentOwner);
+              continue;
+            }
+          } catch (ownerError) {
+            console.warn('验证彩票所有权失败:', listingDetails.ticketId.toString(), ownerError);
+            continue;
+          }
+          
+          matchingListings.push({
+            listingId: listingDetails.id,
+            projectId: listingDetails.projectId,
+            ticketId: listingDetails.ticketId,
+            seller: listingDetails.seller,
+            priceWei: listingDetails.price, // 保持BigNumber格式
+            priceEth: ethers.utils.formatEther(listingDetails.price),
+            isActive: listingDetails.isActive,
+            listTime: listingDetails.listTime,
+            optionIndex: ticketInfo.optionIndex.toNumber()
+          });
+        }
+      } catch (error) {
+        console.warn('获取挂单详情失败:', listingId.toString(), error);
+      }
+    }
+    
+    // 按价格从低到高排序，价格相同时按listingId排序（与合约逻辑保持一致）
+    matchingListings.sort((a, b) => {
+      if (a.priceWei.lt(b.priceWei)) return -1;
+      if (a.priceWei.gt(b.priceWei)) return 1;
+      // 价格相同时，按listingId从小到大排序（与合约的收集顺序一致）
+      return a.listingId.lt(b.listingId) ? -1 : (a.listingId.gt(b.listingId) ? 1 : 0);
+    });
+    
+    console.log('📊 匹配的挂单:', matchingListings.length, '个');
+    
+    if (matchingListings.length < quantity) {
+      return {
+        success: false,
+        error: `可购买数量不足，需要 ${quantity} 张，只有 ${matchingListings.length} 张可用`
+      };
+    }
+    
+    // 计算总价格（使用BigNumber避免精度问题）
+    let totalPriceWei = ethers.BigNumber.from(0);
+    const priceBreakdown: Array<{price: string, count: number}> = [];
+    const priceGroups: {[key: string]: number} = {};
+    
+    for (let i = 0; i < quantity; i++) {
+      const listing = matchingListings[i];
+      totalPriceWei = totalPriceWei.add(listing.priceWei);
+      
+      const priceStr = listing.priceEth;
+      priceGroups[priceStr] = (priceGroups[priceStr] || 0) + 1;
+    }
+    
+    // 构建价格分解
+    Object.entries(priceGroups).forEach(([price, count]) => {
+      priceBreakdown.push({ price, count });
+    });
+    
+    const totalPriceEth = ethers.utils.formatEther(totalPriceWei);
+    console.log('💰 总价格:', totalPriceEth, 'ETH');
+    console.log('💰 总价格(Wei):', totalPriceWei.toString());
+    console.log('📋 价格分解:', priceBreakdown);
+    
+    return {
+      success: true,
+      totalPrice: totalPriceEth,
+      totalPriceWei: totalPriceWei,
+      priceBreakdown
+    };
+  } catch (error: any) {
+    console.error('❌ 计算批量购买价格失败:', error);
+    return {
+      success: false,
+      error: error.message || '价格计算失败'
+    };
+  }
+};
+
+// 获取项目的挂单列表
+export const getProjectListings = async (
+  provider: ethers.providers.Web3Provider,
+  projectId: string
+): Promise<any[]> => {
+  try {
+    console.log('📋 获取项目挂单列表...', { projectId });
+    
+    const contract = new ethers.Contract(EASYBET_CONTRACT_ADDRESS, EASYBET_ABI, provider);
+    const ticketContract = new ethers.Contract(TICKET_NFT_CONTRACT_ADDRESS, TICKET_NFT_ABI, provider);
+    
+    // 获取项目的挂单ID数组
+    const listingIds = await contract.getProjectListings(projectId);
+    console.log('📊 项目挂单ID数组:', listingIds);
+    
+    if (!listingIds || listingIds.length === 0) {
+      console.log('ℹ️ 该项目没有活跃的挂单');
+      return [];
+    }
+    
+    // 逐个获取挂单详情
+    const processedListings = [];
+    for (const listingId of listingIds) {
+      try {
+        const listingDetails = await contract.getListingDetails(listingId);
+        console.log(`📄 挂单 ${listingId} 详情:`, listingDetails);
+        
+        // 确保挂单是活跃的
+        if (!listingDetails.isActive) {
+          console.log(`⚠️ 跳过非活跃挂单 ${listingId}`);
+          continue;
+        }
+        
+        // 获取彩票信息以确定选项
+        let optionIndex = 0;
+        try {
+          const ticketInfo = await ticketContract.getTicketInfo(listingDetails.ticketId);
+          optionIndex = ticketInfo.optionIndex.toNumber();
+        } catch (ticketError) {
+          console.error(`❌ 获取彩票 ${listingDetails.ticketId} 信息失败:`, ticketError);
+        }
+        
+        processedListings.push({
+          listingId: listingDetails.id.toString(),
+          projectId: listingDetails.projectId.toString(),
+          ticketId: listingDetails.ticketId.toString(),
+          seller: listingDetails.seller,
+          price: ethers.utils.formatEther(listingDetails.price),
+          isActive: listingDetails.isActive,
+          listTime: listingDetails.listTime.toNumber(),
+          optionIndex
+        });
+      } catch (error) {
+        console.error(`❌ 获取挂单 ${listingId} 详情失败:`, error);
+      }
+    }
+    
+    console.log('✅ 获取到', processedListings.length, '个项目挂单');
+    return processedListings;
+  } catch (error: any) {
+    console.error('❌ 获取项目挂单列表失败:', error);
+    return [];
   }
 };
 
@@ -862,23 +1232,50 @@ export const getActiveListings = async (
     console.log('📋 开始获取活跃挂单列表...');
     
     const contract = new ethers.Contract(EASYBET_CONTRACT_ADDRESS, EASYBET_ABI, provider);
-    const listings = await contract.getActiveListings();
+    const ticketContract = new ethers.Contract(TICKET_NFT_CONTRACT_ADDRESS, TICKET_NFT_ABI, provider);
     
-    console.log('✅ 获取到', listings.length, '个活跃挂单');
+    // 首先获取活跃挂单的ID数组
+    const listingIds = await contract.getActiveListings();
+    console.log('📊 获取到挂单ID数组:', listingIds);
     
-    // 处理挂单数据
-    const processedListings = listings.map((listing: any) => ({
-      id: listing.id.toString(),
-      projectId: listing.projectId.toString(),
-      ticketId: listing.ticketId.toString(),
-      seller: listing.seller,
-      unitPrice: ethers.utils.formatEther(listing.unitPrice),
-      quantity: listing.quantity.toString(),
-      remainingQuantity: listing.remainingQuantity.toString(),
-      isActive: listing.isActive,
-      listTime: listing.listTime.toString()
-    }));
+    if (!listingIds || listingIds.length === 0) {
+      console.log('ℹ️ 没有活跃的挂单');
+      return [];
+    }
     
+    // 逐个获取挂单详情
+    const processedListings = [];
+    for (const listingId of listingIds) {
+      try {
+        const listingDetails = await contract.getListingDetails(listingId);
+        console.log(`📄 挂单 ${listingId} 详情:`, listingDetails);
+        
+        // 获取彩票信息以确定选项
+        let optionIndex = 0;
+        try {
+          const ticketInfo = await ticketContract.getTicketInfo(listingDetails.ticketId);
+          optionIndex = ticketInfo.optionIndex.toNumber();
+          console.log(`🎫 彩票 ${listingDetails.ticketId} 选项索引:`, optionIndex);
+        } catch (ticketError) {
+          console.error(`❌ 获取彩票 ${listingDetails.ticketId} 信息失败:`, ticketError);
+        }
+        
+        processedListings.push({
+          id: listingDetails.id.toString(),
+          projectId: listingDetails.projectId.toString(),
+          ticketId: listingDetails.ticketId.toString(),
+          seller: listingDetails.seller,
+          price: ethers.utils.formatEther(listingDetails.price),
+          isActive: listingDetails.isActive,
+          listTime: listingDetails.listTime.toString(),
+          optionIndex: optionIndex // 添加选项索引
+        });
+      } catch (error) {
+        console.error(`❌ 获取挂单 ${listingId} 详情失败:`, error);
+      }
+    }
+    
+    console.log('✅ 成功处理', processedListings.length, '个活跃挂单');
     return processedListings;
   } catch (error: any) {
     console.error('❌ 获取活跃挂单列表失败:', error);
@@ -916,5 +1313,155 @@ export const getUserListings = async (
   } catch (error: any) {
     console.error('❌ 获取用户挂单列表失败:', error);
     return [];
+  }
+};
+
+// 检查 NFT 是否已授权给 EasyBet 合约
+export const checkNFTApproval = async (
+  provider: ethers.providers.Web3Provider,
+  userAddress: string,
+  ticketId?: string
+): Promise<{ isApproved: boolean; isApprovedForAll: boolean }> => {
+  try {
+    console.log('🔍 检查 NFT 授权状态...', { userAddress, ticketId });
+    
+    const ticketContract = new ethers.Contract(TICKET_NFT_CONTRACT_ADDRESS, TICKET_NFT_ABI, provider);
+    
+    // 检查是否已授权所有 NFT
+    const isApprovedForAll = await ticketContract.isApprovedForAll(userAddress, EASYBET_CONTRACT_ADDRESS);
+    console.log('📋 全部授权状态:', isApprovedForAll);
+    
+    let isApproved = false;
+    if (ticketId && !isApprovedForAll) {
+      // 检查特定 NFT 的授权
+      const approvedAddress = await ticketContract.getApproved(ticketId);
+      isApproved = approvedAddress.toLowerCase() === EASYBET_CONTRACT_ADDRESS.toLowerCase();
+      console.log('🎫 单个票授权状态:', isApproved, '授权地址:', approvedAddress);
+    }
+    
+    return {
+      isApproved: isApproved || isApprovedForAll,
+      isApprovedForAll
+    };
+  } catch (error: any) {
+    console.error('❌ 检查 NFT 授权失败:', error);
+    return { isApproved: false, isApprovedForAll: false };
+  }
+};
+
+// 授权单个 NFT 给 EasyBet 合约
+export const approveNFT = async (
+  provider: ethers.providers.Web3Provider,
+  ticketId: string
+): Promise<{ success: boolean; error?: string }> => {
+  try {
+    console.log('🔐 开始授权单个 NFT...', ticketId);
+    
+    const signer = provider.getSigner();
+    const ticketContract = new ethers.Contract(TICKET_NFT_CONTRACT_ADDRESS, TICKET_NFT_ABI, signer);
+    
+    const tx = await ticketContract.approve(EASYBET_CONTRACT_ADDRESS, ticketId);
+    console.log('📝 授权交易已提交:', tx.hash);
+    
+    const receipt = await tx.wait();
+    console.log('✅ 授权交易已确认:', receipt.transactionHash);
+    
+    return { success: true };
+  } catch (error: any) {
+    console.error('❌ 授权单个 NFT 失败:', error);
+    return {
+      success: false,
+      error: error.message || '授权失败'
+    };
+  }
+};
+
+// 检查彩票是否已挂单
+export const isTicketListed = async (
+  provider: ethers.providers.Web3Provider,
+  ticketId: string
+): Promise<{ isListed: boolean; listingId?: string; error?: string }> => {
+  try {
+    const contract = new ethers.Contract(EASYBET_CONTRACT_ADDRESS, EASYBET_ABI, provider);
+    
+    const result = await contract.isTicketListed(ticketId);
+    
+    return {
+      isListed: result.isListed,
+      listingId: result.listingId.toString()
+    };
+  } catch (error: any) {
+    console.error('检查彩票挂单状态失败:', error);
+    return {
+      isListed: false,
+      error: error.message || '检查彩票挂单状态失败'
+    };
+  }
+};
+
+// 批量检查彩票是否已挂单
+export const checkMultipleTicketsListed = async (
+  provider: ethers.providers.Web3Provider,
+  ticketIds: string[]
+): Promise<{ 
+  listedTickets: string[]; 
+  unlistedTickets: string[]; 
+  error?: string 
+}> => {
+  try {
+    const listedTickets: string[] = [];
+    const unlistedTickets: string[] = [];
+    
+    for (const ticketId of ticketIds) {
+      const result = await isTicketListed(provider, ticketId);
+      if (result.error) {
+        throw new Error(result.error);
+      }
+      
+      if (result.isListed) {
+        listedTickets.push(ticketId);
+      } else {
+        unlistedTickets.push(ticketId);
+      }
+    }
+    
+    return {
+      listedTickets,
+      unlistedTickets
+    };
+  } catch (error: any) {
+    console.error('批量检查彩票挂单状态失败:', error);
+    return {
+      listedTickets: [],
+      unlistedTickets: [],
+      error: error.message || '批量检查彩票挂单状态失败'
+    };
+  }
+};
+
+// 授权所有 NFT 给 EasyBet 合约
+export const setApprovalForAll = async (
+  provider: ethers.providers.Web3Provider,
+  approved: boolean = true
+): Promise<{ success: boolean; error?: string }> => {
+  try {
+    console.log('🔐 开始设置全部 NFT 授权...', approved);
+    
+    const signer = provider.getSigner();
+    const ticketContract = new ethers.Contract(TICKET_NFT_CONTRACT_ADDRESS, TICKET_NFT_ABI, signer);
+    
+    const tx = await ticketContract.setApprovalForAll(EASYBET_CONTRACT_ADDRESS, approved);
+    console.log('📝 全部授权交易已提交:', tx.hash);
+    
+    const receipt = await tx.wait();
+    console.log('✅ 全部授权交易已确认:', receipt.transactionHash);
+    
+    return { success: true };
+  } catch (error: any) {
+    console.error('❌ 设置全部 NFT 授权失败:', error);
+    return {
+      success: false,
+      error: error.message || '授权失败'
+    };
   }
 };

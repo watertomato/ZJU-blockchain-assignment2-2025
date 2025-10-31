@@ -7,8 +7,15 @@ import {
   getUserTickets, 
   getProjectDetails, 
   listTicketForSale, 
+  listMultipleTicketsForSale,
   buyListedTicket, 
-  getActiveListings 
+  getActiveListings,
+  checkNFTApproval,
+  approveNFT,
+  setApprovalForAll,
+  buyMultipleListedTickets,
+  calculateBulkPurchasePrice,
+  checkMultipleTicketsListed
 } from '../utils/contract';
 import { ethers } from 'ethers';
 
@@ -16,13 +23,17 @@ const { TabPane } = Tabs;
 const { Option } = Select;
 
 interface MarketOrder {
-  id: string;
+  id: string; // 使用 projectId-optionIndex 作为唯一标识
   projectId: string;
   projectTitle: string;
   optionName: string;
-  seller: string;
-  unitPrice: number; // 单价
-  remainingCount: number; // 剩余张数
+  minPrice: number; // 最低价格
+  totalCount: number; // 总张数
+  priceDistribution: Array<{
+    price: number;
+    count: number;
+    listingIds: string[]; // 该价格下的所有挂单ID
+  }>; // 价格分布
 }
 
 interface MarketPageProps {
@@ -33,13 +44,23 @@ const MarketPage: React.FC<MarketPageProps> = ({ defaultTab = 'market' }) => {
   const { address, isConnected } = useWallet();
   const [activeTab, setActiveTab] = useState(defaultTab);
   const [selectedOrder, setSelectedOrder] = useState<MarketOrder | null>(null);
+  const [selectedPrice, setSelectedPrice] = useState<number>(0); // 选中的具体价格
+  const [selectedListingIds, setSelectedListingIds] = useState<string[]>([]); // 选中价格对应的挂单ID
   const [buyModalVisible, setBuyModalVisible] = useState(false);
   const [sellModalVisible, setSellModalVisible] = useState(false);
   const [selectedTicket, setSelectedTicket] = useState<Ticket | null>(null);
   const [sellUnitPrice, setSellUnitPrice] = useState<number>(0); // 出售单价
   const [sellQuantity, setSellQuantity] = useState<number>(1); // 出售数量
+  
+  // 批量购买相关状态
+  const [bulkBuyQuantity, setBulkBuyQuantity] = useState<number>(1); // 批量购买数量
+  const [bulkBuyTotalPrice, setBulkBuyTotalPrice] = useState<string>('0'); // 批量购买总价
+  const [priceBreakdown, setPriceBreakdown] = useState<Array<{price: string, count: number}>>([]); // 价格分解
+  const [calculatingPrice, setCalculatingPrice] = useState(false); // 是否正在计算价格
+  
   const [searchText, setSearchText] = useState('');
   const [sortBy, setSortBy] = useState<string>('price_asc');
+  const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set()); // 展开的行
 
   // 获取provider
   const getProvider = () => {
@@ -70,32 +91,111 @@ const MarketPage: React.FC<MarketPageProps> = ({ defaultTab = 'market' }) => {
       const rawListings = await getActiveListings(provider);
       console.log('📊 原始挂单数据:', rawListings);
 
-      // 处理挂单数据，获取项目详情
-      const processedOrders: MarketOrder[] = [];
+      // 按项目+选项聚合挂单数据
+      const aggregatedData = new Map<string, {
+        projectId: string;
+        projectTitle: string;
+        optionName: string;
+        listings: Array<{
+          id: string;
+          price: number;
+          seller: string;
+        }>;
+      }>();
+
+      // 处理挂单数据，获取项目详情并聚合（添加所有权验证）
       for (const listing of rawListings) {
         try {
-          const project = await getProjectDetails(provider, listing.projectId);
-          if (project && listing.isActive && parseInt(listing.remainingQuantity) > 0) {
-            // 从 ticketId 获取选项信息 - 这里需要调用 TicketNFT 合约
-            // 暂时使用项目的第一个选项作为默认值
-            const optionName = project.options[0]?.name || '未知选项';
+          if (!listing.isActive) continue;
+          
+          // 验证NFT所有权（与购买验证逻辑保持一致）
+          try {
+            const ticketNFTContract = new ethers.Contract(
+              process.env.REACT_APP_TICKET_NFT_ADDRESS || '0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512',
+              [
+                'function ownerOf(uint256 tokenId) view returns (address)'
+              ],
+              provider
+            );
             
-            processedOrders.push({
-              id: listing.id,
+            const currentOwner = await ticketNFTContract.ownerOf(listing.ticketId);
+            if (currentOwner.toLowerCase() !== listing.seller.toLowerCase()) {
+              console.log('跳过所有权不匹配的挂单:', listing.id, '卖家:', listing.seller, '实际所有者:', currentOwner);
+              continue;
+            }
+          } catch (ownerError) {
+            console.warn('验证彩票所有权失败，跳过挂单:', listing.ticketId, ownerError);
+            continue;
+          }
+          
+          const project = await getProjectDetails(provider, listing.projectId);
+          if (!project) continue;
+
+          const optionIndex = listing.optionIndex || 0;
+          const optionName = project.options[optionIndex]?.name || '未知选项';
+          const key = `${listing.projectId}-${optionIndex}`;
+
+          if (!aggregatedData.has(key)) {
+            aggregatedData.set(key, {
               projectId: listing.projectId,
               projectTitle: project.title,
               optionName: optionName,
-              seller: listing.seller,
-              unitPrice: parseFloat(listing.unitPrice),
-              remainingCount: parseInt(listing.remainingQuantity)
+              listings: []
             });
           }
+
+          const group = aggregatedData.get(key)!;
+          group.listings.push({
+            id: listing.id,
+            price: parseFloat(listing.price),
+            seller: listing.seller
+          });
         } catch (error) {
           console.error('处理挂单数据失败:', listing.id, error);
         }
       }
 
-      console.log('✅ 处理后的市场订单:', processedOrders);
+      // 转换为最终的MarketOrder格式
+      const processedOrders: MarketOrder[] = [];
+      const aggregatedEntries = Array.from(aggregatedData.entries());
+      for (const [key, group] of aggregatedEntries) {
+        if (group.listings.length === 0) continue;
+
+        // 按价格分组统计
+        const priceGroups = new Map<number, string[]>();
+        let minPrice = Infinity;
+
+        for (const listing of group.listings) {
+          const price = listing.price;
+          minPrice = Math.min(minPrice, price);
+          
+          if (!priceGroups.has(price)) {
+            priceGroups.set(price, []);
+          }
+          priceGroups.get(price)!.push(listing.id);
+        }
+
+        // 构建价格分布
+        const priceDistribution = Array.from(priceGroups.entries())
+          .map(([price, listingIds]) => ({
+            price,
+            count: listingIds.length,
+            listingIds
+          }))
+          .sort((a, b) => a.price - b.price);
+
+        processedOrders.push({
+          id: key,
+          projectId: group.projectId,
+          projectTitle: group.projectTitle,
+          optionName: group.optionName,
+          minPrice: minPrice === Infinity ? 0 : minPrice,
+          totalCount: group.listings.length,
+          priceDistribution
+        });
+      }
+
+      console.log('✅ 聚合后的市场订单:', processedOrders);
       setMarketOrders(processedOrders);
     } catch (error) {
       console.error('❌ 获取市场挂单失败:', error);
@@ -184,7 +284,63 @@ const MarketPage: React.FC<MarketPageProps> = ({ defaultTab = 'market' }) => {
 
   const handleBuyTicket = (order: MarketOrder) => {
     setSelectedOrder(order);
+    setBulkBuyQuantity(1); // 默认购买1张
+    setBulkBuyTotalPrice('0');
+    setPriceBreakdown([]);
     setBuyModalVisible(true);
+    
+    // 立即计算1张的价格
+    calculateBulkPrice(order, 1);
+  };
+
+  // 计算批量购买价格
+  const calculateBulkPrice = async (order: MarketOrder, quantity: number) => {
+    if (!order || quantity <= 0) {
+      setBulkBuyTotalPrice('0');
+      setPriceBreakdown([]);
+      return;
+    }
+
+    const provider = getProvider();
+    if (!provider) {
+      message.error('请先连接钱包');
+      return;
+    }
+
+    setCalculatingPrice(true);
+    try {
+      // 从order.id中解析出projectId和optionIndex
+      const [projectId, optionIndexStr] = order.id.split('-');
+      const optionIndex = parseInt(optionIndexStr);
+
+      const result = await calculateBulkPurchasePrice(provider, projectId, optionIndex, quantity);
+      
+      if (result.success) {
+        setBulkBuyTotalPrice(result.totalPrice || '0');
+        setPriceBreakdown(result.priceBreakdown || []);
+      } else {
+        message.error(result.error || '价格计算失败');
+        setBulkBuyTotalPrice('0');
+        setPriceBreakdown([]);
+      }
+    } catch (error: any) {
+      console.error('价格计算失败:', error);
+      message.error('价格计算失败');
+      setBulkBuyTotalPrice('0');
+      setPriceBreakdown([]);
+    } finally {
+      setCalculatingPrice(false);
+    }
+  };
+
+  // 当批量购买数量变化时，重新计算价格
+  const handleBulkQuantityChange = (quantity: number | null) => {
+    const newQuantity = quantity || 1;
+    setBulkBuyQuantity(newQuantity);
+    
+    if (selectedOrder) {
+      calculateBulkPrice(selectedOrder, newQuantity);
+    }
   };
 
   const handleSellTicket = (ticket: Ticket) => {
@@ -195,7 +351,7 @@ const MarketPage: React.FC<MarketPageProps> = ({ defaultTab = 'market' }) => {
   };
 
   const confirmBuy = async () => {
-    if (!selectedOrder) return;
+    if (!selectedOrder || bulkBuyQuantity <= 0) return;
     
     const provider = getProvider();
     if (!provider) {
@@ -204,20 +360,26 @@ const MarketPage: React.FC<MarketPageProps> = ({ defaultTab = 'market' }) => {
     }
 
     try {
-      // 默认购买1张彩票
-      const quantity = 1;
-      const totalAmount = (selectedOrder.unitPrice * quantity).toString();
+      // 从order.id中解析出projectId和optionIndex
+      const [projectId, optionIndexStr] = selectedOrder.id.split('-');
+      const optionIndex = parseInt(optionIndexStr);
       
-      console.log('🛒 开始购买彩票...', {
-        listingId: selectedOrder.id,
-        quantity,
-        totalAmount
+      console.log('🛒 开始批量购买彩票...', {
+        projectId,
+        optionIndex,
+        quantity: bulkBuyQuantity,
+        totalPrice: bulkBuyTotalPrice
       });
 
-      const result = await buyListedTicket(provider, selectedOrder.id, quantity, totalAmount);
+      const result = await buyMultipleListedTickets(
+        provider, 
+        projectId, 
+        optionIndex, 
+        bulkBuyQuantity
+      );
       
       if (result.success) {
-        message.success('成功购买彩票！');
+        message.success(`成功购买 ${bulkBuyQuantity} 张彩票！`);
         
         // 重新获取数据
         fetchUserTickets();
@@ -226,12 +388,15 @@ const MarketPage: React.FC<MarketPageProps> = ({ defaultTab = 'market' }) => {
         message.error(result.error || '购买失败');
       }
     } catch (error: any) {
-      console.error('购买失败:', error);
+      console.error('批量购买失败:', error);
       message.error(error.message || '购买失败');
     }
     
     setBuyModalVisible(false);
     setSelectedOrder(null);
+    setBulkBuyQuantity(1);
+    setBulkBuyTotalPrice('0');
+    setPriceBreakdown([]);
   };
 
   const confirmSell = async () => {
@@ -268,52 +433,161 @@ const MarketPage: React.FC<MarketPageProps> = ({ defaultTab = 'market' }) => {
     }
 
     try {
-      // 选择要出售的彩票ID（取前sellQuantity个）
-      const ticketsToSell = selectedTicket.ticketIds.slice(0, sellQuantity);
+      // 步骤1: 检查哪些彩票已经挂单，选择未挂单的彩票
+      console.log('🔍 检查彩票挂单状态...');
+      message.loading('正在检查彩票状态...', 0);
+      
+      const checkResult = await checkMultipleTicketsListed(provider, selectedTicket.ticketIds);
+      message.destroy();
+      
+      if (checkResult.error) {
+        message.error(`检查彩票状态失败: ${checkResult.error}`);
+        return;
+      }
+      
+      const { listedTickets, unlistedTickets } = checkResult;
+      
+      console.log('📊 彩票状态检查结果:', {
+        总数: selectedTicket.ticketIds.length,
+        已挂单: listedTickets.length,
+        未挂单: unlistedTickets.length,
+        需要挂单: sellQuantity
+      });
+      
+      // 检查是否有足够的未挂单彩票
+      if (unlistedTickets.length < sellQuantity) {
+        const listedCount = listedTickets.length;
+        const availableCount = unlistedTickets.length;
+        
+        message.warning(
+          `无法挂单 ${sellQuantity} 张彩票。` +
+          `您有 ${selectedTicket.ticketIds.length} 张彩票，其中 ${listedCount} 张已挂单，` +
+          `只有 ${availableCount} 张可用于挂单。`
+        );
+        return;
+      }
+      
+      // 选择要出售的彩票ID（从未挂单的彩票中选择）
+      const ticketsToSell = unlistedTickets.slice(0, sellQuantity);
+      
+      // 如果有彩票被跳过，提示用户
+      if (listedTickets.length > 0) {
+        message.info(`已跳过 ${listedTickets.length} 张已挂单的彩票，将挂单 ${sellQuantity} 张未挂单的彩票`);
+      }
       
       console.log('💰 开始挂单出售...', {
         ticketsToSell,
         unitPrice: sellUnitPrice,
-        quantity: sellQuantity
+        quantity: sellQuantity,
+        skippedCount: listedTickets.length
       });
 
-      // 对每张彩票分别调用挂单函数
-      let successCount = 0;
-      for (const ticketId of ticketsToSell) {
-        try {
-          const result = await listTicketForSale(
-            provider, 
-            ticketId, 
-            sellUnitPrice.toString(), 
-            1 // 每次挂单1张
-          );
+      // 步骤2: 检查授权状态
+      console.log('🔍 检查 NFT 授权状态...');
+      const approvalStatus = await checkNFTApproval(provider, address);
+      
+      if (!approvalStatus.isApprovedForAll) {
+        console.log('⚠️ 需要授权 NFT 给 EasyBet 合约');
+        
+        // 询问用户是否要授权所有 NFT
+        const shouldApproveAll = await new Promise<boolean>((resolve) => {
+          Modal.confirm({
+            title: '需要授权 NFT',
+            content: (
+              <div>
+                <p>为了挂单出售彩票，需要先授权 EasyBet 合约操作您的 NFT。</p>
+                <p><strong>推荐选择：</strong>授权所有 NFT（一次授权，后续挂单无需重复授权）</p>
+                <p><strong>或者：</strong>仅授权本次要出售的 NFT（每次挂单都需要授权）</p>
+              </div>
+            ),
+            okText: '授权所有 NFT（推荐）',
+            cancelText: '仅授权本次 NFT',
+            onOk: () => resolve(true),
+            onCancel: () => resolve(false),
+          });
+        });
+
+        if (shouldApproveAll) {
+          // 授权所有 NFT
+          console.log('🔐 开始授权所有 NFT...');
+          message.loading('正在授权所有 NFT，请在钱包中确认...', 0);
           
-          if (result.success) {
-            successCount++;
-          } else {
-            console.error(`彩票 ${ticketId} 挂单失败:`, result.error);
+          const approveAllResult = await setApprovalForAll(provider, true);
+          message.destroy();
+          
+          if (!approveAllResult.success) {
+            message.error(approveAllResult.error || '授权失败');
+            return;
           }
-        } catch (error) {
-          console.error(`彩票 ${ticketId} 挂单异常:`, error);
+          
+          message.success('成功授权所有 NFT！');
+        } else {
+          // 逐个授权本次要出售的 NFT
+          console.log('🔐 开始逐个授权 NFT...');
+          message.loading(`正在授权 ${ticketsToSell.length} 个 NFT，请在钱包中确认...`, 0);
+          
+          for (let i = 0; i < ticketsToSell.length; i++) {
+            const ticketId = ticketsToSell[i];
+            console.log(`🎫 授权第 ${i + 1}/${ticketsToSell.length} 个 NFT: ${ticketId}`);
+            
+            const approveResult = await approveNFT(provider, ticketId);
+            if (!approveResult.success) {
+              message.destroy();
+              message.error(`授权 NFT ${ticketId} 失败: ${approveResult.error}`);
+              return;
+            }
+          }
+          
+          message.destroy();
+          message.success(`成功授权 ${ticketsToSell.length} 个 NFT！`);
+        }
+      } else {
+        console.log('✅ NFT 已授权，可以直接挂单');
+      }
+
+      // 步骤3: 执行挂单
+      console.log('📝 开始执行挂单...');
+      message.loading('正在挂单，请在钱包中确认...', 0);
+
+      if (sellQuantity === 1) {
+        // 单张彩票挂单
+        const result = await listTicketForSale(
+          provider, 
+          ticketsToSell[0], 
+          sellUnitPrice.toString()
+        );
+        
+        message.destroy();
+        
+        if (result.success) {
+          message.success('成功挂单 1 张彩票！');
+          fetchUserTickets();
+          fetchMarketOrders();
+        } else {
+          message.error(result.error || '挂单失败');
+        }
+      } else {
+        // 批量挂单
+        const prices = Array(sellQuantity).fill(sellUnitPrice.toString());
+        
+        const result = await listMultipleTicketsForSale(
+          provider,
+          ticketsToSell,
+          prices
+        );
+        
+        message.destroy();
+        
+        if (result.success) {
+          message.success(`成功挂单 ${sellQuantity} 张彩票！`);
+          fetchUserTickets();
+          fetchMarketOrders();
+        } else {
+          message.error(result.error || '批量挂单失败');
         }
       }
-      
-      if (successCount === sellQuantity) {
-        message.success(`成功挂单 ${successCount} 张彩票！`);
-        
-        // 重新获取数据
-        fetchUserTickets();
-        fetchMarketOrders();
-      } else if (successCount > 0) {
-        message.warning(`部分成功：${successCount}/${sellQuantity} 张彩票挂单成功`);
-        
-        // 重新获取数据
-        fetchUserTickets();
-        fetchMarketOrders();
-      } else {
-        message.error('所有彩票挂单失败');
-      }
     } catch (error: any) {
+      message.destroy();
       console.error('挂单失败:', error);
       message.error(error.message || '挂单失败');
     }
@@ -333,14 +607,51 @@ const MarketPage: React.FC<MarketPageProps> = ({ defaultTab = 'market' }) => {
   const sortedOrders = [...filteredOrders].sort((a, b) => {
     switch (sortBy) {
       case 'price_asc':
-        return a.unitPrice - b.unitPrice;
+        return a.minPrice - b.minPrice;
       case 'price_desc':
-        return b.unitPrice - a.unitPrice;
+        return b.minPrice - a.minPrice;
       case 'time':
       default:
         return 0; // 暂时不按时间排序，因为没有时间字段
     }
   });
+
+  // 切换行展开状态
+  const toggleRowExpansion = (recordId: string) => {
+    const newExpandedRows = new Set(expandedRows);
+    if (newExpandedRows.has(recordId)) {
+      newExpandedRows.delete(recordId);
+    } else {
+      newExpandedRows.add(recordId);
+    }
+    setExpandedRows(newExpandedRows);
+  };
+
+  // 渲染价格分布详情
+  const renderPriceDistribution = (order: MarketOrder) => {
+    return (
+      <div style={{ padding: '16px', backgroundColor: '#f9f9f9', margin: '8px 0' }}>
+        <h4>价格详情</h4>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          {order.priceDistribution.map((item, index) => (
+            <div key={index} style={{ 
+              display: 'flex', 
+              justifyContent: 'space-between', 
+              alignItems: 'center',
+              padding: '8px 12px',
+              backgroundColor: 'white',
+              borderRadius: '4px',
+              border: '1px solid #d9d9d9'
+            }}>
+              <span>
+                <strong>{item.price.toFixed(4)} ETH</strong> - {item.count} 张
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
 
   const marketColumns = [
     {
@@ -360,39 +671,44 @@ const MarketPage: React.FC<MarketPageProps> = ({ defaultTab = 'market' }) => {
       )
     },
     {
-      title: '卖家',
-      dataIndex: 'seller',
-      key: 'seller',
-      render: (text: string) => `${text.slice(0, 6)}...${text.slice(-4)}`
-    },
-    {
-      title: '单价',
-      dataIndex: 'unitPrice',
-      key: 'unitPrice',
+      title: '最低价格',
+      dataIndex: 'minPrice',
+      key: 'minPrice',
       render: (price: number) => (
-        <span style={{ fontSize: '16px', fontWeight: 'bold' }}>{price} ETH</span>
+        <span style={{ fontSize: '16px', fontWeight: 'bold', color: '#52c41a' }}>
+          {price.toFixed(4)} ETH
+        </span>
       )
     },
     {
       title: '剩余张数',
-      dataIndex: 'remainingCount',
-      key: 'remainingCount',
+      dataIndex: 'totalCount',
+      key: 'totalCount',
       render: (count: number) => (
-        <span style={{ color: '#1890ff' }}>{count} 张</span>
+        <span style={{ fontSize: '14px', fontWeight: 'bold', color: '#1890ff' }}>
+          {count} 张
+        </span>
       )
     },
     {
       title: '操作',
       key: 'action',
       render: (_: any, record: MarketOrder) => (
-        <Button 
-          type="primary" 
-          icon={<ShoppingCartOutlined />}
-          disabled={record.seller === address}
-          onClick={() => handleBuyTicket(record)}
-        >
-          购买
-        </Button>
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <Button 
+            type="primary" 
+            icon={<ShoppingCartOutlined />}
+            onClick={() => handleBuyTicket(record)}
+          >
+            购买最低价
+          </Button>
+          <Button 
+            type="default"
+            onClick={() => toggleRowExpansion(record.id)}
+          >
+            {expandedRows.has(record.id) ? '收起' : '查看详情'}
+          </Button>
+        </div>
       )
     }
   ];
@@ -475,6 +791,22 @@ const MarketPage: React.FC<MarketPageProps> = ({ defaultTab = 'market' }) => {
               dataSource={sortedOrders}
               rowKey="id"
               pagination={{ pageSize: 10 }}
+              expandable={{
+                expandedRowRender: (record) => renderPriceDistribution(record),
+                expandedRowKeys: Array.from(expandedRows),
+                onExpand: (expanded, record) => {
+                  if (expanded) {
+                    setExpandedRows(prev => new Set(Array.from(prev).concat(record.id)));
+                  } else {
+                    setExpandedRows(prev => {
+                      const newSet = new Set(prev);
+                      newSet.delete(record.id);
+                      return newSet;
+                    });
+                  }
+                },
+                showExpandColumn: false // 隐藏默认的展开列，使用自定义按钮
+              }}
             />
           </TabPane>
 
@@ -501,22 +833,75 @@ const MarketPage: React.FC<MarketPageProps> = ({ defaultTab = 'market' }) => {
 
       {/* 购买确认弹窗 */}
       <Modal
-        title="确认购买"
+        title="批量购买彩票"
         visible={buyModalVisible}
         onOk={confirmBuy}
         onCancel={() => setBuyModalVisible(false)}
         okText="确认购买"
         cancelText="取消"
+        width={600}
       >
         {selectedOrder && (
           <div>
             <p><strong>项目:</strong> {selectedOrder.projectTitle}</p>
             <p><strong>选项:</strong> {selectedOrder.optionName}</p>
-            <p><strong>单价:</strong> {selectedOrder.unitPrice.toFixed(4)} ETH</p>
-            <p><strong>剩余张数:</strong> {selectedOrder.remainingCount}</p>
-            <p><strong>卖家:</strong> {selectedOrder.seller}</p>
+            
+            <div style={{ margin: '20px 0' }}>
+              <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold' }}>
+                购买数量:
+              </label>
+              <InputNumber
+                min={1}
+                max={selectedOrder.totalCount}
+                value={bulkBuyQuantity}
+                onChange={handleBulkQuantityChange}
+                style={{ width: '200px' }}
+                placeholder="请输入购买数量"
+              />
+              <span style={{ marginLeft: '10px', color: '#666' }}>
+                (最多可购买 {selectedOrder.totalCount} 张)
+              </span>
+            </div>
+
+            <div style={{ margin: '20px 0' }}>
+              <p><strong>总价格:</strong> 
+                {calculatingPrice ? (
+                  <span style={{ marginLeft: '8px', color: '#1890ff' }}>计算中...</span>
+                ) : (
+                  <span style={{ marginLeft: '8px', fontSize: '16px', color: '#f5222d' }}>
+                    {parseFloat(bulkBuyTotalPrice).toFixed(4)} ETH
+                  </span>
+                )}
+              </p>
+              
+              {priceBreakdown.length > 0 && (
+                <div style={{ marginTop: '10px' }}>
+                  <p style={{ fontWeight: 'bold', marginBottom: '8px' }}>价格明细:</p>
+                  <div style={{ 
+                    maxHeight: '150px', 
+                    overflowY: 'auto',
+                    border: '1px solid #d9d9d9',
+                    borderRadius: '4px',
+                    padding: '8px'
+                  }}>
+                    {priceBreakdown.map((item, index) => (
+                      <div key={index} style={{ 
+                        display: 'flex', 
+                        justifyContent: 'space-between',
+                        padding: '4px 0',
+                        borderBottom: index < priceBreakdown.length - 1 ? '1px solid #f0f0f0' : 'none'
+                      }}>
+                        <span>{parseFloat(item.price).toFixed(4)} ETH</span>
+                        <span>{item.count} 张</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+            
             <p style={{ color: '#666', fontSize: '12px' }}>
-              确认购买后，ETH将从您的钱包转出，彩票将转入您的账户。
+              确认购买后，ETH将从您的钱包转出，彩票将转入您的账户。系统将自动从最低价格开始购买。
             </p>
           </div>
         )}
