@@ -835,4 +835,87 @@ contract EasyBet {
         }
         return (false, 0);
     }
+
+    /**
+     * @dev 终止项目并进行结算
+     * @param _projectId 项目ID
+     * @param _winningOption 获胜选项索引
+     */
+    function terminateProject(uint256 _projectId, uint256 _winningOption) 
+        external 
+        onlyNotary 
+        projectExists(_projectId) 
+    {
+        BettingProject storage project = projects[_projectId];
+        
+        // 验证项目状态
+        require(project.isActive, "Project is not active");
+        require(!project.isFinalized, "Project already finalized");
+        require(_winningOption < project.options.length, "Invalid winning option");
+        
+        // 更新项目状态
+        project.isFinalized = true;
+        project.isActive = false;
+        project.winningOption = _winningOption;
+        
+        // 计算奖池总金额：仅使用初始奖池
+        uint256 totalPrizePool = project.totalPrize;
+        
+        // 计算获胜选项的总投注金额
+        uint256 winningBetAmount = optionBets[_projectId][_winningOption];
+        
+        if (winningBetAmount > 0) {
+            // 有获胜者，记录项目已终止，等待分配奖金
+            emit ProjectFinalized(_projectId, _winningOption, totalPrizePool);
+        } else {
+            // 如果没有获胜者，奖池退还给项目创建者
+            payable(project.creator).transfer(totalPrizePool);
+            emit ProjectFinalized(_projectId, _winningOption, 0);
+        }
+    }
+
+    /**
+     * @dev 为获胜彩票分配奖金（需要传入彩票ID列表）
+     * @param _projectId 项目ID
+     * @param _ticketIds 获胜彩票ID列表
+     */
+    function distributeRewardsToTickets(
+        uint256 _projectId, 
+        uint256[] calldata _ticketIds
+    ) external onlyNotary projectExists(_projectId) {
+        BettingProject storage project = projects[_projectId];
+        
+        require(project.isFinalized, "Project not finalized");
+        require(_ticketIds.length > 0, "No tickets provided");
+        
+        // 计算奖池总金额：仅使用初始奖池
+        uint256 totalPrizePool = project.totalPrize;
+        
+        // 验证彩票并计算总的获胜彩票数
+        uint256 validTicketCount = 0;
+        ITicketNFT ticketNFT = ITicketNFT(ticketNFTAddress);
+        
+        for (uint256 i = 0; i < _ticketIds.length; i++) {
+            (uint256 projectId, uint256 optionIndex, , , , ) = ticketNFT.getTicketInfo(_ticketIds[i]);
+            
+            if (projectId == _projectId && optionIndex == project.winningOption) {
+                validTicketCount++;
+            }
+        }
+        
+        require(validTicketCount > 0, "No valid winning tickets");
+        
+        // 计算每张彩票的奖金
+        uint256 rewardPerTicket = totalPrizePool / validTicketCount;
+        
+        // 分配奖金
+        for (uint256 i = 0; i < _ticketIds.length; i++) {
+            (uint256 projectId, uint256 optionIndex, , , , ) = ticketNFT.getTicketInfo(_ticketIds[i]);
+            
+            if (projectId == _projectId && optionIndex == project.winningOption) {
+                address ticketOwner = ticketNFT.ownerOf(_ticketIds[i]);
+                payable(ticketOwner).transfer(rewardPerTicket);
+            }
+        }
+    }
 }

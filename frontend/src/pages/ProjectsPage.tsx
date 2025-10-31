@@ -14,7 +14,10 @@ import {
   Badge,
   Empty,
   Spin,
-  Statistic
+  Statistic,
+  Modal,
+  Radio,
+  message
 } from 'antd';
 import { 
   SearchOutlined, 
@@ -23,10 +26,11 @@ import {
   ClockCircleOutlined,
   UserOutlined,
   PlusOutlined,
-  ReloadOutlined
+  ReloadOutlined,
+  StopOutlined
 } from '@ant-design/icons';
 import { useWallet } from '../hooks/useWallet';
-import { getActiveProjects } from '../utils/contract';
+import { getActiveProjects, terminateProject } from '../utils/contract';
 import { ethers } from 'ethers';
 import { BettingProject } from '../types';
 import PurchaseModal from '../components/PurchaseModal';
@@ -47,6 +51,12 @@ const ProjectsPage: React.FC<ProjectsPageProps> = ({ onCreateProject }) => {
   const [selectedStatus, setSelectedStatus] = useState('all');
   const [purchaseModalVisible, setPurchaseModalVisible] = useState(false);
   const [selectedProject, setSelectedProject] = useState<BettingProject | null>(null);
+  
+  // 终止项目相关状态
+  const [terminateModalVisible, setTerminateModalVisible] = useState(false);
+  const [projectToTerminate, setProjectToTerminate] = useState<BettingProject | null>(null);
+  const [selectedWinningOption, setSelectedWinningOption] = useState<number | null>(null);
+  const [terminating, setTerminating] = useState(false);
 
   // 加载项目数据
   const loadProjects = async () => {
@@ -73,6 +83,53 @@ const ProjectsPage: React.FC<ProjectsPageProps> = ({ onCreateProject }) => {
     setSelectedProject(null);
     // 重新加载项目数据以更新统计信息
     loadProjects();
+  };
+
+  // 处理终止项目
+  const handleTerminateProject = (project: BettingProject) => {
+    setProjectToTerminate(project);
+    setSelectedWinningOption(null);
+    setTerminateModalVisible(true);
+  };
+
+  // 确认终止项目
+  const confirmTerminateProject = async () => {
+    if (!projectToTerminate || selectedWinningOption === null) {
+      message.error('请选择获胜选项');
+      return;
+    }
+
+    if (!window.ethereum) {
+      message.error('请先连接钱包');
+      return;
+    }
+
+    setTerminating(true);
+    try {
+      const provider = new ethers.providers.Web3Provider(window.ethereum);
+      
+      // 调用合约终止项目的函数
+      const result = await terminateProject(provider, projectToTerminate.id, selectedWinningOption);
+      
+      if (result.success) {
+        message.success(`项目 "${projectToTerminate.title}" 已终止并完成奖金分配！获胜选项：${projectToTerminate.options[selectedWinningOption].name}`);
+        
+        // 重新加载项目数据
+        loadProjects();
+        
+        // 关闭弹窗
+        setTerminateModalVisible(false);
+        setProjectToTerminate(null);
+        setSelectedWinningOption(null);
+      } else {
+        throw new Error(result.error || '终止项目失败');
+      }
+    } catch (error: any) {
+      console.error('终止项目失败:', error);
+      message.error(error.message || '终止项目失败');
+    } finally {
+      setTerminating(false);
+    }
   };
 
   // 筛选项目
@@ -123,6 +180,8 @@ const ProjectsPage: React.FC<ProjectsPageProps> = ({ onCreateProject }) => {
     const timeRemaining = getTimeRemaining(project.endTime);
     const isEnded = project.endTime < Date.now();
 
+    const canTerminate = isNotary && project.status === 'active' && !isEnded;
+
     return (
       <Card
         hoverable
@@ -134,7 +193,16 @@ const ProjectsPage: React.FC<ProjectsPageProps> = ({ onCreateProject }) => {
             onClick={() => handlePurchaseTicket(project)}
           >
             {isEnded ? '已结束' : '参与竞猜'}
-          </Button>
+          </Button>,
+          ...(canTerminate ? [
+            <Button 
+              danger
+              icon={<StopOutlined />}
+              onClick={() => handleTerminateProject(project)}
+            >
+              终止项目
+            </Button>
+          ] : [])
         ]}
       >
         <Card.Meta
@@ -322,6 +390,74 @@ const ProjectsPage: React.FC<ProjectsPageProps> = ({ onCreateProject }) => {
           onSuccess={handlePurchaseSuccess}
         />
       )}
+
+      {/* 终止项目弹窗 */}
+      <Modal
+        title="终止项目"
+        open={terminateModalVisible}
+        onOk={confirmTerminateProject}
+        onCancel={() => {
+          setTerminateModalVisible(false);
+          setProjectToTerminate(null);
+          setSelectedWinningOption(null);
+        }}
+        confirmLoading={terminating}
+        okText="确认终止"
+        cancelText="取消"
+        okButtonProps={{ danger: true }}
+      >
+        {projectToTerminate && (
+          <div>
+            <div style={{ marginBottom: 16 }}>
+              <Text strong>项目：</Text>
+              <Text>{projectToTerminate.title}</Text>
+            </div>
+            
+            <div style={{ marginBottom: 16 }}>
+              <Text type="secondary">
+                终止项目后，将根据您选择的获胜选项进行结算。所有选择获胜选项的玩家将平分奖池。
+              </Text>
+            </div>
+
+            <div>
+              <Text strong style={{ marginBottom: 8, display: 'block' }}>
+                请选择获胜选项：
+              </Text>
+              <Radio.Group
+                value={selectedWinningOption}
+                onChange={(e) => setSelectedWinningOption(e.target.value)}
+                style={{ width: '100%' }}
+              >
+                <Space direction="vertical" style={{ width: '100%' }}>
+                   {projectToTerminate.options.map((option, index) => (
+                     <Radio key={index} value={index} style={{ width: '100%' }}>
+                        <div style={{ 
+                          display: 'flex', 
+                          justifyContent: 'space-between', 
+                          alignItems: 'center',
+                          width: '100%',
+                          paddingLeft: '8px',
+                          minHeight: '32px'
+                        }}>
+                          <span style={{ flex: 1, marginRight: '16px' }}>{option.name}</span>
+                          <span style={{ 
+                            color: '#666', 
+                            fontSize: '12px',
+                            textAlign: 'right',
+                            minWidth: '100px',
+                            flexShrink: 0
+                          }}>
+                            {option.ticketCount} 张彩票
+                          </span>
+                        </div>
+                      </Radio>
+                   ))}
+                 </Space>
+              </Radio.Group>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 };

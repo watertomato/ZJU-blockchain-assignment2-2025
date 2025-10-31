@@ -84,10 +84,10 @@ const MainLayout: React.FC<MainLayoutProps> = ({
         
         {!collapsed && (
           <>
-            <Text strong style={{ display: 'block', fontSize: 12 }}>
+            <Text strong style={{ display: 'block', fontSize: 12, color: 'white' }}>
               {shortAddress}
             </Text>
-            <Text type="secondary" style={{ fontSize: 11 }}>
+            <Text style={{ fontSize: 11, color: 'rgba(255, 255, 255, 0.65)' }}>
               {parseFloat(balance).toFixed(4)} ETH
             </Text>
             {hasNotaryNFT && (

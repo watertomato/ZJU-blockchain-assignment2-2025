@@ -117,6 +117,43 @@ export const useWallet = () => {
     return cleanup;
   }, [userState.isConnected, userState.address, connect, disconnect, refreshUserState]);
 
+  // 余额轮询更新
+  useEffect(() => {
+    if (!userState.isConnected || !userState.address) return;
+
+    const updateBalance = async () => {
+      try {
+        if (!window.ethereum || !userState.address) return;
+        
+        const ethersModule = await import('ethers');
+        const provider = new ethersModule.providers.Web3Provider(window.ethereum);
+        const newBalance = await getETHBalance(userState.address, provider);
+        
+        // 只有余额发生变化时才更新
+        if (newBalance !== userState.balance) {
+          dispatch(updateUserState({
+            role: userState.role,
+            balance: newBalance,
+            notaryNFT: userState.notaryNFT
+          }));
+        }
+      } catch (error) {
+        // 静默处理错误，避免频繁的错误提示
+        console.debug('余额更新失败:', error);
+      }
+    };
+
+    // 立即执行一次
+    updateBalance();
+
+    // 设置定时器，每秒更新一次
+    const intervalId = setInterval(updateBalance, 1000);
+
+    return () => {
+      clearInterval(intervalId);
+    };
+  }, [userState.isConnected, userState.address, userState.balance, userState.role, userState.notaryNFT, dispatch]);
+
   return {
     // 钱包状态
     isConnecting: walletState.isConnecting,

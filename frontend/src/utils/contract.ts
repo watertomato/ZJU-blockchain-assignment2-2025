@@ -13,7 +13,7 @@ const EASYBET_ABI = [
   'event ProjectCreated(uint256 indexed projectId, address indexed creator, string title, string[] options, uint256 totalPrize, uint256 endTime)',
   'event BetPlaced(uint256 indexed projectId, address indexed user, uint256 optionId, uint256 amount)',
   'event TicketPurchased(uint256 indexed projectId, address indexed buyer, uint256 indexed ticketId, uint256 optionIndex, uint256 amount)',
-  'event ProjectFinalized(uint256 indexed projectId, uint256 winningOption)',
+  'event ProjectFinalized(uint256 indexed projectId, uint256 winningOption, uint256 totalPayout)',
   'event MarketplaceAction(uint256 indexed listingId, uint256 indexed projectId, uint256 indexed ticketId, address seller, address buyer, uint256 unitPrice, uint256 quantity, string action)',
   
   // 查询函数
@@ -43,7 +43,9 @@ const EASYBET_ABI = [
   
   // 管理函数
   'function setNotaryNFTAddress(address _notaryNFTAddress)',
-  'function setTicketNFTAddress(address _ticketNFTAddress)'
+  'function setTicketNFTAddress(address _ticketNFTAddress)',
+  'function terminateProject(uint256 projectId, uint256 winningOption)',
+  'function distributeRewardsToTickets(uint256 projectId, uint256[] ticketIds)'
 ];
 
 // TicketNFT 合约 ABI
@@ -1462,6 +1464,119 @@ export const setApprovalForAll = async (
     return {
       success: false,
       error: error.message || '授权失败'
+    };
+  }
+};
+
+// 终止项目并分配奖池
+export const terminateProject = async (
+  provider: ethers.providers.Web3Provider,
+  projectId: string,
+  winningOption: number
+): Promise<{ success: boolean; error?: string }> => {
+  try {
+    console.log('🎯 开始终止项目:', { projectId, winningOption });
+    
+    const signer = provider.getSigner();
+    const contract = new ethers.Contract(EASYBET_CONTRACT_ADDRESS, EASYBET_ABI, signer);
+    
+    // 第一步：调用合约的terminateProject函数
+    console.log('📝 第一步：终止项目...');
+    const tx = await contract.terminateProject(projectId, winningOption);
+    console.log('📝 交易已发送:', tx.hash);
+    
+    // 等待交易确认
+    const receipt = await tx.wait();
+    console.log('✅ 项目终止成功:', receipt);
+    
+    // 第二步：获取获胜彩票并分配奖金
+    console.log('🎫 第二步：获取获胜彩票...');
+    const winningTicketsResult = await getWinningTickets(provider, projectId, winningOption);
+    
+    if (!winningTicketsResult.success) {
+      throw new Error(winningTicketsResult.error || '获取获胜彩票失败');
+    }
+    
+    const winningTicketIds = winningTicketsResult.ticketIds || [];
+    console.log('🏆 获胜彩票数量:', winningTicketIds.length);
+    
+    if (winningTicketIds.length > 0) {
+      // 第三步：分配奖金给获胜彩票
+      console.log('💰 第三步：分配奖金...');
+      const distributeTx = await contract.distributeRewardsToTickets(projectId, winningTicketIds);
+      console.log('📝 分配奖金交易已发送:', distributeTx.hash);
+      
+      const distributeReceipt = await distributeTx.wait();
+      console.log('✅ 奖金分配成功:', distributeReceipt);
+      console.log('🎉 项目终止并奖金分配完成！');
+    } else {
+      console.log('ℹ️ 没有获胜彩票，奖池已退还给项目创建者');
+    }
+    
+    return { success: true };
+  } catch (error: any) {
+    console.error('❌ 终止项目失败:', error);
+    return {
+      success: false,
+      error: error.message || '终止项目失败'
+    };
+  }
+};
+
+// 获取项目的胜利彩票ID列表
+export const getWinningTickets = async (
+  provider: ethers.providers.Web3Provider,
+  projectId: string,
+  winningOption: number
+): Promise<{ success: boolean; ticketIds?: string[]; error?: string }> => {
+  try {
+    console.log('🎫 获取胜利彩票:', { projectId, winningOption });
+    
+    const ticketContract = new ethers.Contract(TICKET_NFT_CONTRACT_ADDRESS, TICKET_NFT_ABI, provider);
+    
+    // 获取项目的所有彩票
+    console.log('📋 正在获取项目所有彩票...');
+    const allTickets = await ticketContract.getTicketsByProject(projectId);
+    console.log('📋 项目所有彩票:', allTickets.map((t: any) => t.toString()));
+    console.log('📊 彩票总数:', allTickets.length);
+    
+    // 筛选出胜利选项的彩票
+    const winningTickets = [];
+    console.log('🔍 开始筛选获胜彩票，目标选项:', winningOption);
+    
+    for (let i = 0; i < allTickets.length; i++) {
+      const ticketId = allTickets[i];
+      try {
+        console.log(`🎫 检查彩票 ${i + 1}/${allTickets.length}: ID=${ticketId.toString()}`);
+        const ticketInfo = await ticketContract.getTicketInfo(ticketId);
+        const [projectIdFromTicket, optionIndex, betAmount, bettor, purchaseTimestamp, metadataURI] = ticketInfo;
+        
+        console.log(`   - 项目ID: ${projectIdFromTicket.toString()}`);
+        console.log(`   - 选项索引: ${optionIndex.toNumber()}`);
+        console.log(`   - 投注金额: ${ethers.utils.formatEther(betAmount)} ETH`);
+        console.log(`   - 投注者: ${bettor}`);
+        
+        if (projectIdFromTicket.toString() === projectId && optionIndex.toNumber() === winningOption) {
+          winningTickets.push(ticketId.toString());
+          console.log(`   ✅ 这是获胜彩票！`);
+        } else {
+          console.log(`   ❌ 不是获胜彩票 (项目匹配: ${projectIdFromTicket.toString() === projectId}, 选项匹配: ${optionIndex.toNumber() === winningOption})`);
+        }
+      } catch (error) {
+        console.warn(`⚠️ 获取彩票信息失败 ID=${ticketId.toString()}:`, error);
+      }
+    }
+    
+    console.log('🏆 筛选完成！');
+    console.log('🏆 获胜彩票列表:', winningTickets);
+    console.log('🏆 获胜彩票数量:', winningTickets.length);
+    
+    return { success: true, ticketIds: winningTickets };
+  } catch (error: any) {
+    console.error('❌ 获取胜利彩票失败:', error);
+    return {
+      success: false,
+      error: error.message || '获取胜利彩票失败'
     };
   }
 };
